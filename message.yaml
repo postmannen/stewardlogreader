@@ -1,0 +1,10 @@
+---
+- toNodes:
+    - central
+  method: REQToFile
+  # data:
+  replyMethod: REQToFileAppend
+  ACKTimeout: 30
+  retries: 3
+  replyACKTimeout: 15
+  replyRetries: 3
