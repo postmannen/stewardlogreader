@@ -22,8 +22,8 @@ func main() {
 	socketFullPath := flag.String("socketFullPath", "", "the full path to the steward socket file")
 	messageFullPath := flag.String("messageFullPath", "./message.yaml", "the full path to the message to be used as the template for sending")
 	logFolder := flag.String("logFolder", "", "the log folder to watch")
-	maxFileAge := flag.Int("maxFileAge", 60, "how old a single file is allowed to be in minutes before it gets read and sent to the steward socket")
-	checkInterval := flag.Int("checkInterval", 5, "the check interval in minutes")
+	maxFileAge := flag.Int("maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
+	checkInterval := flag.Int("checkInterval", 5, "the check interval in seconds")
 	flag.Parse()
 
 	sigCh := make(chan os.Signal, 1)
@@ -48,8 +48,10 @@ func main() {
 	}
 
 	ticker := time.NewTicker(time.Second * (time.Duration(*checkInterval)))
+	defer ticker.Stop()
+
 	go func() {
-		for range ticker.C {
+		for ; true; <-ticker.C {
 
 			files, err := getFilesSorted(*logFolder)
 			if err != nil {
@@ -58,6 +60,8 @@ func main() {
 			}
 
 			for i := range files {
+				fmt.Println()
+
 				age, err := fileIsHowOld(files[i].fullPath)
 				if err != nil {
 					log.Printf("%v\n", err)
@@ -66,13 +70,13 @@ func main() {
 
 				if age > *maxFileAge {
 					// TODO: Read the content, and create message with data, and send it here.
-					fmt.Printf(" * file is older than maxAge, sending off file: %v\n", files[i])
-					b, err := readFileContent(files[i].fullPath)
+					fmt.Printf(" * file is older than maxAge: %v\n", files[i])
+
+					err := readSendDeleteFile(msg, files[i], *socketFullPath)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
 					}
-					fmt.Printf(" * read from file %v: %v\n", files[i].fullPath, string(b))
 
 					continue
 				}
@@ -92,7 +96,14 @@ func main() {
 							log.Printf("%v\n", err)
 							os.Exit(1)
 						}
-						fmt.Printf(" * read from file %v: %v\n", files[i].fullPath, string(b))
+
+						msg[0].Data = b
+
+						err = readSendDeleteFile(msg, files[i], *socketFullPath)
+						if err != nil {
+							log.Printf("%v\n", err)
+							os.Exit(1)
+						}
 
 					}
 				}
@@ -105,6 +116,35 @@ func main() {
 
 }
 
+// readSendDeleteFile is a wrapper function for the functions that
+// will read File, send File and deletes the file.
+func readSendDeleteFile(msg []Message, file fileAndDate, socketFullPath string) error {
+	b, err := readFileContent(file.fullPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf(" * read from file %v: %v\n", file.fullPath, string(b))
+
+	msg[0].Data = b
+	msg[0].FileName = file.filebase
+	err = messageToSocket(socketFullPath, msg, b)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf(" *** message %+v\n", msg)
+	fmt.Printf(" **** msg.Data as string, file:%v, .data:%v\n", file.fullPath, string(b))
+
+	// TODO: Delete the file here.
+	err = os.Remove(file.fullPath)
+	if err != nil {
+		return fmt.Errorf("error: failed to remove the file: %v", err)
+	}
+
+	return nil
+}
+
+// readFileContent will read the content of the file, and return it as a []byte.
 func readFileContent(fileName string) ([]byte, error) {
 	fh, err := os.Open(fileName)
 	if err != nil {
@@ -128,7 +168,7 @@ func fileIsHowOld(fileName string) (int, error) {
 		return 0, fmt.Errorf("error: fileIshowOld os.Stat failed: %v", err)
 	}
 
-	modTime := (time.Now().Unix() - fi.ModTime().Unix()) / 60
+	modTime := (time.Now().Unix() - fi.ModTime().Unix())
 	return int(modTime), nil
 }
 
@@ -139,6 +179,8 @@ type fileAndDate struct {
 	date            int
 }
 
+// getFilesSorted will look up all the files in the given folder,
+// and return a list of files found sorted.
 func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 
 	// Get the names of all the log files.
@@ -152,10 +194,21 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 			fmt.Println(path, info.Size())
 
 			filebase := filepath.Base(path)
+			fi, err := os.Stat(path)
+			if err != nil {
+				return fmt.Errorf("error: failed to stat filbase: %v", path)
+			}
+			if fi.IsDir() {
+				log.Printf(" * info: is directory, doing nothing: %v\n", filebase)
+				return nil
+			}
+
+			fmt.Printf(" *** filebase contains: %+v\n", filebase)
 			filebaseSplit := strings.Split(filebase, ".")
+			fmt.Printf(" *** filebaseSplit contains: %+v\n", filebaseSplit)
 			// If it does not contain an underscore we just skip the file.
 			if len(filebaseSplit) < 2 {
-				log.Printf("info: filename was to short, should be <yeardatetime>.<name>.., got: %v\n", filebaseSplit)
+				log.Printf("info: filename was to short, should be <yeardatetime>.<name>.., got: %#v\n", filebaseSplit)
 				return nil
 			}
 
@@ -180,7 +233,7 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 		return []fileAndDate{}, err
 	}
 
-	fmt.Printf("before sort: %+v\n", files)
+	// fmt.Printf("before sort: %+v\n", files)
 
 	// Sort the files
 	sort.SliceStable(files, func(i, j int) bool {
@@ -190,29 +243,22 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 	return files, nil
 }
 
-func messageFileToSocket(socketFullPath string, messageFullPath string) error {
+// messageToSocket will write the message to the steward unix socket.
+func messageToSocket(socketFullPath string, msg []Message, data []byte) error {
 	socket, err := net.Dial("unix", socketFullPath)
 	if err != nil {
-		return fmt.Errorf(" * failed: could not open socket file for writing: %v", err)
+		return fmt.Errorf("error : could not open socket file for writing: %v", err)
 	}
 	defer socket.Close()
 
-	fp, err := os.Open(messageFullPath)
+	b, err := yaml.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf(" * failed: could not open message file for reading: %v", err)
-	}
-	defer fp.Close()
-
-	_, err = io.Copy(socket, fp)
-	if err != nil {
-		return fmt.Errorf("error: io.Copy failed: %v", err)
+		return fmt.Errorf("error: failed to marshal message: %v", err)
 	}
 
-	log.Printf("info: succesfully wrote message to socket\n")
-
-	err = os.Remove(messageFullPath)
+	_, err = socket.Write(b)
 	if err != nil {
-		return fmt.Errorf("error: os.Remove failed: %v", err)
+		return fmt.Errorf("error: failed to write message to socket: %v", err)
 	}
 
 	return nil
