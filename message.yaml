@@ -1,11 +1,40 @@
 ---
-- toNodes:
+- directory: /Users/bt/Documents/raalabs/stewardlogreader/logs
+  fileName: copy.log.copied
+  method: REQCopySrc
+  methodArgs:
+    - "/Users/bt/Documents/raalabs/stewardlogreader/logs"
     - central
-  method: REQToFile
-  # data:
-  replyMethod: REQToFileAppend
-  ACKTimeout: 30
-  retries: 3
-  replyACKTimeout: 15
-  replyRetries: 3
-  directory: logs
+    #- "/Users/bt/Documents/raalabs/stewardlogreader/logs-copied"
+    - "/Users/bt/Documents/raalabs/stewardlogreader/logs-copied"
+    - "500000"
+    - "20"
+  methodTimeout: 10
+  replyMethod: REQToFile
+  toNodes:
+    - central
+---
+# - directory: copy
+#   fileName: copy.log
+#   method: REQCopySrc
+#   methodArgs:
+#   - "./fluent-logs/$name"
+#   - logs
+#   - "/log-data/$name"
+#   - '500000'
+#   - '20'
+#   methodTimeout: 10
+#   replyMethod: REQToConsole
+#   toNodes:
+#   - craig-bot
+
+# - toNodes:
+#     - central
+#   method: REQToFile
+#   # data:
+#   replyMethod: REQToFileAppend
+#   ACKTimeout: 30
+#   retries: 3
+#   replyACKTimeout: 15
+#   replyRetries: 3
+#   directory: logs

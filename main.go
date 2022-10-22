@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/fsnotify.v1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,6 +50,20 @@ func main() {
 	ticker := time.NewTicker(time.Second * (time.Duration(*checkInterval)))
 	defer ticker.Stop()
 
+	// Start checking for copied files.
+	// Create new watcher.
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer watcher.Close()
+
+	err = deleteCopiedFiles(watcher, *logFolder)
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
 	go func() {
 		for ; true; <-ticker.C {
 
@@ -62,6 +76,28 @@ func main() {
 			for i := range files {
 				fmt.Println()
 
+				// Check if the file is a .copied, or that it got a .copied file,
+				// and if so, delete both
+				// TODO : HERE:
+				// We should probably move this to it's own goroutine, and check over
+				// the files with fsnotify, and that, shall trigger the deletion.
+				// Maybe we allso should rename worked on files with .lock, and if a
+				// lock is held for more than some limit?, we then remove the lock
+				// again since something probably went wrong, so we want to retry.
+				switch {
+				case strings.HasSuffix(files[i].filebase, ".copied"):
+					err = os.Remove(files[i].fullPath)
+					if err != nil {
+						log.Printf("error: failed to remove the file: %v\n", err)
+					}
+					err = os.Remove(strings.TrimSuffix(files[i].fullPath, ".copied"))
+					if err != nil {
+						log.Printf("error: failed to remove the file: %v\n", err)
+					}
+
+					continue
+				}
+
 				age, err := fileIsHowOld(files[i].fullPath)
 				if err != nil {
 					log.Printf("%v\n", err)
@@ -72,7 +108,7 @@ func main() {
 					// TODO: Read the content, and create message with data, and send it here.
 					fmt.Printf(" * file is older than maxAge: %v\n", files[i])
 
-					err := readSendDeleteFile(msg, files[i], *socketFullPath)
+					err := sendDeleteFile(msg, files[i], *socketFullPath)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
@@ -91,15 +127,8 @@ func main() {
 
 						// TODO: Read the content, and create message with data, and send it here.
 						fmt.Printf(" * sending off file: %v\n", files[i])
-						b, err := readFileContent(files[i].fullPath)
-						if err != nil {
-							log.Printf("%v\n", err)
-							os.Exit(1)
-						}
 
-						msg[0].Data = b
-
-						err = readSendDeleteFile(msg, files[i], *socketFullPath)
+						err = sendDeleteFile(msg, files[i], *socketFullPath)
 						if err != nil {
 							log.Printf("%v\n", err)
 							os.Exit(1)
@@ -116,49 +145,87 @@ func main() {
 
 }
 
-// readSendDeleteFile is a wrapper function for the functions that
-// will read File, send File and deletes the file.
-func readSendDeleteFile(msg []Message, file fileAndDate, socketFullPath string) error {
-	b, err := readFileContent(file.fullPath)
-	if err != nil {
-		return err
-	}
-	fmt.Printf(" * read from file %v: %v\n", file.fullPath, string(b))
+func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 
-	msg[0].Data = b
-	msg[0].FileName = file.filebase
-	err = messageToSocket(socketFullPath, msg, b)
-	if err != nil {
-		return err
-	}
+	// Start listening for events.
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				log.Println("event:", event)
+				if event.Op == fsnotify.Write {
+					log.Println("************ WRITE file:", event.Name)
+				}
+				if event.Op == fsnotify.Create {
+					log.Println("************ CREATE file:", event.Name)
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+	}()
 
-	fmt.Printf(" *** message %+v\n", msg)
-	fmt.Printf(" **** msg.Data as string, file:%v, .data:%v\n", file.fullPath, string(b))
-
-	// TODO: Delete the file here.
-	err = os.Remove(file.fullPath)
+	// Add a path.
+	err := watcher.Add(logFolder)
 	if err != nil {
-		return fmt.Errorf("error: failed to remove the file: %v", err)
+		log.Fatal(err)
 	}
 
 	return nil
 }
 
-// readFileContent will read the content of the file, and return it as a []byte.
-func readFileContent(fileName string) ([]byte, error) {
-	fh, err := os.Open(fileName)
+// readSendDeleteFile is a wrapper function for the functions that
+// will read File, send File and deletes the file.
+func sendDeleteFile(msg []Message, file fileAndDate, socketFullPath string) error {
+
+	// HERE: Insert the correct values for source and destination file in MethodArgs
+	// args[0] is the source
+	// args[2] is the destination
+
+	// Append the actual filename to the directory specified in the msg template.
+	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.filebase)
+	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], file.filebase)
+	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
+	msg[0].FileName = filepath.Join(file.filebase + ".copied")
+	err := messageToSocket(socketFullPath, msg)
 	if err != nil {
-		return nil, fmt.Errorf("error: readFileContent failed to open file: %v", err)
+		return err
 	}
-	defer fh.Close()
+	fmt.Printf(" *** put message for file %v on socket\n", file.filebase)
 
-	b, err := io.ReadAll(fh)
-	if err != nil {
-		return nil, fmt.Errorf("error: readFileContent failed to read file: %v", err)
-	}
+	//go func() {
+	//
+	//	// Check if we've received a <...>.copied file
+	//	ticker := time.NewTicker(time.Second * 4)
+	//	defer ticker.Stop()
+	//
+	//	// TODO: We should probably add a max wait here.
+	//	for range ticker.C {
+	//		if _, err := os.Stat(filepath.Join(file.filebase + ".copied")); os.IsNotExist(err) {
+	//			// TODO: Delete the file here.
+	//			err = os.Remove(file.fullPath)
+	//			if err != nil {
+	//				log.Printf("error: failed to remove the file: %v\n", err)
+	//			}
+	//			err = os.Remove(file.fullPath + ".copied")
+	//			if err != nil {
+	//				log.Printf("error: failed to remove the file: %v\n", err)
+	//			}
+	//
+	//			return
+	//		}
+	//
+	//	}
+	//
+	//}()
 
-	return b, nil
-
+	return nil
 }
 
 // fileIsHowOld will return how old a file is in minutes.
@@ -206,7 +273,7 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 			fmt.Printf(" *** filebase contains: %+v\n", filebase)
 			filebaseSplit := strings.Split(filebase, ".")
 			fmt.Printf(" *** filebaseSplit contains: %+v\n", filebaseSplit)
-			// If it does not contain an underscore we just skip the file.
+			// If it does not contain an . we just skip the file.
 			if len(filebaseSplit) < 2 {
 				log.Printf("info: filename was to short, should be <yeardatetime>.<name>.., got: %#v\n", filebaseSplit)
 				return nil
@@ -244,7 +311,7 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 }
 
 // messageToSocket will write the message to the steward unix socket.
-func messageToSocket(socketFullPath string, msg []Message, data []byte) error {
+func messageToSocket(socketFullPath string, msg []Message) error {
 	socket, err := net.Dial("unix", socketFullPath)
 	if err != nil {
 		return fmt.Errorf("error : could not open socket file for writing: %v", err)
