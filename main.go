@@ -169,6 +169,15 @@ func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 								log.Printf("error: failed to remove the file: %v\n", err)
 							}
 
+							// Delete any .lock. files
+							lockFileBase := strings.TrimPrefix(filebase, ".lock.")
+							lockFileFullPath := filepath.Join(fileDir, lockFileBase)
+
+							err = os.Remove(lockFileFullPath)
+							if err != nil {
+								log.Printf("error: failed to remove the file: %v\n", err)
+							}
+
 						}
 					}
 				}
