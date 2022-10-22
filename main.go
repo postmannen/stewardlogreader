@@ -170,8 +170,7 @@ func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 							}
 
 							// Delete any .lock. files
-							lockFileBase := strings.TrimPrefix(filebase, ".lock.")
-							lockFileFullPath := filepath.Join(fileDir, lockFileBase)
+							lockFileFullPath := filepath.Join(fileDir, ".lock."+actualLogFileBase)
 
 							err = os.Remove(lockFileFullPath)
 							if err != nil {
@@ -206,9 +205,14 @@ func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 // will read File, send File and deletes the file.
 func sendDeleteFile(msg []Message, file fileAndDate, socketFullPath string) error {
 
-	// HERE: Insert the correct values for source and destination file in MethodArgs
-	// args[0] is the source
-	// args[2] is the destination
+	// Create a .lock.<..> file
+	fileDir := filepath.Dir(file.fullPath)
+	lockFileRealPath := filepath.Join(fileDir, ".lock."+file.filebase)
+	fhLock, err := os.Create(lockFileRealPath)
+	if err != nil {
+		return fmt.Errorf("error: failed to create lock file: %v", err)
+	}
+	fhLock.Close()
 
 	// Append the actual filename to the directory specified in the msg template.
 	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.filebase)
@@ -216,37 +220,11 @@ func sendDeleteFile(msg []Message, file fileAndDate, socketFullPath string) erro
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
 	msg[0].FileName = filepath.Join(".copied." + file.filebase)
 	fmt.Printf("\n DEBUG: file.filebase = %v\n", file.filebase)
-	err := messageToSocket(socketFullPath, msg)
+	err = messageToSocket(socketFullPath, msg)
 	if err != nil {
 		return err
 	}
 	fmt.Printf(" *** put message for file %v on socket\n", file.filebase)
-
-	//go func() {
-	//
-	//	// Check if we've received a <...>.copied file
-	//	ticker := time.NewTicker(time.Second * 4)
-	//	defer ticker.Stop()
-	//
-	//	// TODO: We should probably add a max wait here.
-	//	for range ticker.C {
-	//		if _, err := os.Stat(filepath.Join(file.filebase + ".copied")); os.IsNotExist(err) {
-	//			// TODO: Delete the file here.
-	//			err = os.Remove(file.fullPath)
-	//			if err != nil {
-	//				log.Printf("error: failed to remove the file: %v\n", err)
-	//			}
-	//			err = os.Remove(file.fullPath + ".copied")
-	//			if err != nil {
-	//				log.Printf("error: failed to remove the file: %v\n", err)
-	//			}
-	//
-	//			return
-	//		}
-	//
-	//	}
-	//
-	//}()
 
 	return nil
 }
