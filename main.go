@@ -76,28 +76,6 @@ func main() {
 			for i := range files {
 				fmt.Println()
 
-				// Check if the file is a .copied, or that it got a .copied file,
-				// and if so, delete both
-				// TODO : HERE:
-				// We should probably move this to it's own goroutine, and check over
-				// the files with fsnotify, and that, shall trigger the deletion.
-				// Maybe we allso should rename worked on files with .lock, and if a
-				// lock is held for more than some limit?, we then remove the lock
-				// again since something probably went wrong, so we want to retry.
-				switch {
-				case strings.HasSuffix(files[i].filebase, ".copied"):
-					err = os.Remove(files[i].fullPath)
-					if err != nil {
-						log.Printf("error: failed to remove the file: %v\n", err)
-					}
-					err = os.Remove(strings.TrimSuffix(files[i].fullPath, ".copied"))
-					if err != nil {
-						log.Printf("error: failed to remove the file: %v\n", err)
-					}
-
-					continue
-				}
-
 				age, err := fileIsHowOld(files[i].fullPath)
 				if err != nil {
 					log.Printf("%v\n", err)
@@ -156,8 +134,43 @@ func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 					return
 				}
 				log.Println("event:", event)
-				if event.Op == fsnotify.Write {
+				if event.Op == fsnotify.Create {
 					log.Println("************ WRITE file:", event.Name)
+
+					filebase := filepath.Base(event.Name)
+					fileDir := filepath.Dir(event.Name)
+					fullPath := event.Name
+					{
+						// Check if the file is a .copied, or that it got a .copied file,
+						// and if so, delete both
+						// TODO : HERE:
+						// We should probably move this to it's own goroutine, and check over
+						// the files with fsnotify, and that, shall trigger the deletion.
+						// Maybe we allso should rename worked on files with .lock, and if a
+						// lock is held for more than some limit?, we then remove the lock
+						// again since something probably went wrong, so we want to retry.
+						switch {
+						case strings.HasPrefix(filebase, ".copied."):
+							fmt.Println("FOUND .COPIED FILE")
+
+							// Also get the name of the actual log file without the .copied.
+							actualLogFileBase := strings.TrimPrefix(filebase, ".copied.")
+							actualLogFileFullPath := filepath.Join(fileDir, actualLogFileBase)
+
+							// First delete the actual log file.
+							err := os.Remove(actualLogFileFullPath)
+							if err != nil {
+								log.Printf("error: failed to remove the file: %v\n", err)
+							}
+
+							// Then delete the the .copied.<...> file.
+							err = os.Remove(fullPath)
+							if err != nil {
+								log.Printf("error: failed to remove the file: %v\n", err)
+							}
+
+						}
+					}
 				}
 				if event.Op == fsnotify.Create {
 					log.Println("************ CREATE file:", event.Name)
@@ -192,7 +205,8 @@ func sendDeleteFile(msg []Message, file fileAndDate, socketFullPath string) erro
 	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.filebase)
 	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], file.filebase)
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
-	msg[0].FileName = filepath.Join(file.filebase + ".copied")
+	msg[0].FileName = filepath.Join(".copied." + file.filebase)
+	fmt.Printf("\n DEBUG: file.filebase = %v\n", file.filebase)
 	err := messageToSocket(socketFullPath, msg)
 	if err != nil {
 		return err
@@ -281,7 +295,8 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 
 			dateInt, err := strconv.Atoi(filebaseSplit[0])
 			if err != nil {
-				return err
+				log.Printf("error: strconv.Atoi: %v\n", err)
+				return nil
 			}
 
 			n := strings.Join(filebaseSplit[1:], ".")
