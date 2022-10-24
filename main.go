@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,6 +26,8 @@ func main() {
 	logFolder := flag.String("logFolder", "", "the log folder to watch")
 	maxFileAge := flag.Int("maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
 	checkInterval := flag.Int("checkInterval", 5, "the check interval in seconds")
+	prefixName := flag.String("prefixName", "", "name to be prefixed to the file name")
+	prefixTimeNow := flag.Bool("prefixTimeNow", false, "set to true to prefix the filename with the time the file was piced up for copying")
 	flag.Parse()
 
 	sigCh := make(chan os.Signal, 1)
@@ -92,7 +93,7 @@ func main() {
 					}
 					// !!!
 
-					err = sendFile(msg, files[i], *socketFullPath)
+					err = sendFile(msg, files[i], *socketFullPath, *prefixName, *prefixTimeNow)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
@@ -182,7 +183,7 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 
 // sendFile is a wrapper function for the functions that
 // will read File, send File and deletes the file.
-func sendFile(msg []Message, file fileInfo, socketFullPath string) error {
+func sendFile(msg []Message, file fileInfo, socketFullPath string, prefixName string, prefixTimeNow bool) error {
 
 	// Create a .lock.<..> file
 	//fileDir := filepath.Dir(file.fullPath)
@@ -197,10 +198,20 @@ func sendFile(msg []Message, file fileInfo, socketFullPath string) error {
 	// both source and destination.
 	// Where source is  msg[0].MethodArgs[0],
 	// and destination is, msg[0].MethodArgs[2]
+
+	timeNow := strconv.Itoa(int(time.Now().Unix()))
+	var prefix string
+	switch {
+	case prefixName == "" && prefixTimeNow:
+		prefix = fmt.Sprintf("%s-", timeNow)
+	case prefixName != "" && prefixTimeNow:
+		prefix = fmt.Sprintf("%s-%s-", timeNow, prefixName)
+	}
+
 	fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
 	fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
 	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.fileName)
-	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], file.fileName)
+	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], prefix+file.fileName)
 	fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
 	fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
 
@@ -235,8 +246,6 @@ type fileInfo struct {
 	fileDir            string
 	lockFileRealPath   string
 	copiedFileRealPath string
-	nameWithoutDate    string
-	dateInName         int
 }
 
 // getFilesSorted will look up all the files in the given folder,
@@ -268,37 +277,29 @@ func getFilesSorted(logFolder string) ([]fileInfo, error) {
 			copiedFileRealPath := filepath.Join(fileDir, ".copied."+fileName)
 			lockFileRealPath := filepath.Join(fileDir, ".lock."+fileName)
 
-			// Check if it is a lock file, and if it is jump out since we don't work on them.
+			// Check if it is a .lock file, and if it is jump out since we don't work on them.
 			_, err = os.Stat(lockFileRealPath)
 			if err == nil {
 				fmt.Printf(" * ITERATING FILES; FOUND LOCK FIlE, JUMPING OUT OF CURRENT WALK ITEM\n")
+				return nil
+			}
+			// Check if it is a .copied file, and if it is jump out since we don't work on them.
+			_, err = os.Stat(lockFileRealPath)
+			if err == nil {
+				fmt.Printf(" * ITERATING FILES; FOUND COPIED FIlE, JUMPING OUT OF CURRENT WALK ITEM\n")
 				return nil
 			}
 
 			fmt.Printf(" *** filebase contains: %+v\n", fileName)
 			filebaseSplit := strings.Split(fileName, ".")
 			fmt.Printf(" *** filebaseSplit contains: %+v\n", filebaseSplit)
-			// If it does not contain an . we just skip the file.
-			if len(filebaseSplit) < 2 {
-				log.Printf("info: filename was to short, should be <yeardatetime>.<name>.., got: %#v\n", filebaseSplit)
-				return nil
-			}
 
-			dateInt, err := strconv.Atoi(filebaseSplit[0])
-			if err != nil {
-				log.Printf("error: strconv.Atoi: %v\n", err)
-				return nil
-			}
-
-			n := strings.Join(filebaseSplit[1:], ".")
 			f := fileInfo{
 				fileRealPath:       path,
 				fileName:           fileName,
 				fileDir:            fileDir,
 				copiedFileRealPath: copiedFileRealPath,
 				lockFileRealPath:   lockFileRealPath,
-				nameWithoutDate:    n,
-				dateInName:         dateInt,
 			}
 
 			files = append(files, f)
@@ -310,11 +311,6 @@ func getFilesSorted(logFolder string) ([]fileInfo, error) {
 	}
 
 	// fmt.Printf("before sort: %+v\n", files)
-
-	// Sort the files
-	sort.SliceStable(files, func(i, j int) bool {
-		return files[i].dateInName < files[j].dateInName
-	})
 
 	return files, nil
 }
