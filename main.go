@@ -18,6 +18,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TODO:
+//  - If there is a lock file for a file, skip working on the file.
+
 func main() {
 	socketFullPath := flag.String("socketFullPath", "", "the full path to the steward socket file")
 	messageFullPath := flag.String("messageFullPath", "./message.yaml", "the full path to the message to be used as the template for sending")
@@ -58,7 +61,7 @@ func main() {
 	}
 	defer watcher.Close()
 
-	err = deleteCopiedFiles(watcher, *logFolder)
+	err = deleteCopiedFilesWatcher(watcher, *logFolder)
 	if err != nil {
 		log.Printf("%v\n", err)
 		os.Exit(1)
@@ -76,7 +79,7 @@ func main() {
 			for i := range files {
 				fmt.Println()
 
-				age, err := fileIsHowOld(files[i].fullPath)
+				age, err := fileIsHowOld(files[i].fileRealPath)
 				if err != nil {
 					log.Printf("%v\n", err)
 					os.Exit(1)
@@ -95,7 +98,7 @@ func main() {
 					continue
 				}
 
-				fmt.Printf(" * age of file %v, is %v\n", files[i].fullPath, age)
+				fmt.Printf(" * age of file %v, is %v\n", files[i].fileRealPath, age)
 
 				if i < len(files)-1 {
 					// Since the files are sorted by the time written, we know that if there is
@@ -123,7 +126,7 @@ func main() {
 
 }
 
-func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
+func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error {
 
 	// Start listening for events.
 	go func() {
@@ -160,13 +163,13 @@ func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 							// First delete the actual log file.
 							err := os.Remove(actualLogFileFullPath)
 							if err != nil {
-								log.Printf("error: failed to remove the file: %v\n", err)
+								log.Printf("error: failed to remove the file actual log file: %v\n", err)
 							}
 
 							// Then delete the the .copied.<...> file.
 							err = os.Remove(fullPath)
 							if err != nil {
-								log.Printf("error: failed to remove the file: %v\n", err)
+								log.Printf("error: failed to remove the file .copied file: %v\n", err)
 							}
 
 							// Delete any .lock. files
@@ -174,8 +177,9 @@ func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 
 							err = os.Remove(lockFileFullPath)
 							if err != nil {
-								log.Printf("error: failed to remove the file: %v\n", err)
+								log.Printf("error: failed to remove the .lock file: %v\n", err)
 							}
+							fmt.Printf("successfully delete lock file: %v\n", lockFileFullPath)
 
 						}
 					}
@@ -203,28 +207,28 @@ func deleteCopiedFiles(watcher *fsnotify.Watcher, logFolder string) error {
 
 // readSendDeleteFile is a wrapper function for the functions that
 // will read File, send File and deletes the file.
-func sendDeleteFile(msg []Message, file fileAndDate, socketFullPath string) error {
+func sendDeleteFile(msg []Message, file fileInfo, socketFullPath string) error {
 
 	// Create a .lock.<..> file
-	fileDir := filepath.Dir(file.fullPath)
-	lockFileRealPath := filepath.Join(fileDir, ".lock."+file.filebase)
-	fhLock, err := os.Create(lockFileRealPath)
+	//fileDir := filepath.Dir(file.fullPath)
+	//lockFileRealPath := filepath.Join(fileDir, ".lock."+file.fileName)
+	fhLock, err := os.Create(file.lockFileRealPath)
 	if err != nil {
 		return fmt.Errorf("error: failed to create lock file: %v", err)
 	}
 	fhLock.Close()
 
 	// Append the actual filename to the directory specified in the msg template.
-	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.filebase)
-	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], file.filebase)
+	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.fileName)
+	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], file.fileName)
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
-	msg[0].FileName = filepath.Join(".copied." + file.filebase)
-	fmt.Printf("\n DEBUG: file.filebase = %v\n", file.filebase)
+	msg[0].FileName = filepath.Join(".copied." + file.fileName)
+	fmt.Printf("\n DEBUG: file.filebase = %v\n", file.fileName)
 	err = messageToSocket(socketFullPath, msg)
 	if err != nil {
 		return err
 	}
-	fmt.Printf(" *** put message for file %v on socket\n", file.filebase)
+	fmt.Printf(" *** put message for file %v on socket\n", file.fileName)
 
 	return nil
 }
@@ -240,19 +244,22 @@ func fileIsHowOld(fileName string) (int, error) {
 	return int(modTime), nil
 }
 
-type fileAndDate struct {
-	fullPath        string
-	filebase        string
-	nameWithoutDate string
-	date            int
+type fileInfo struct {
+	fileRealPath       string
+	fileName           string
+	fileDir            string
+	lockFileRealPath   string
+	copiedFileRealPath string
+	nameWithoutDate    string
+	dateInName         int
 }
 
 // getFilesSorted will look up all the files in the given folder,
 // and return a list of files found sorted.
-func getFilesSorted(logFolder string) ([]fileAndDate, error) {
+func getFilesSorted(logFolder string) ([]fileInfo, error) {
 
 	// Get the names of all the log files.
-	files := []fileAndDate{}
+	files := []fileInfo{}
 
 	err := filepath.Walk(logFolder,
 		func(path string, info os.FileInfo, err error) error {
@@ -261,18 +268,30 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 			}
 			fmt.Println(path, info.Size())
 
-			filebase := filepath.Base(path)
+			fileName := filepath.Base(path)
+
 			fi, err := os.Stat(path)
 			if err != nil {
 				return fmt.Errorf("error: failed to stat filbase: %v", path)
 			}
 			if fi.IsDir() {
-				log.Printf(" * info: is directory, doing nothing: %v\n", filebase)
+				log.Printf(" * info: is directory, doing nothing: %v\n", fileName)
 				return nil
 			}
 
-			fmt.Printf(" *** filebase contains: %+v\n", filebase)
-			filebaseSplit := strings.Split(filebase, ".")
+			fileDir := filepath.Dir(path)
+			copiedFileRealPath := filepath.Join(fileDir, ".copied."+fileName)
+			lockFileRealPath := filepath.Join(fileDir, ".lock."+fileName)
+
+			// Check if it is a lock file, and if it is jump out since we don't work on them.
+			_, err = os.Stat(lockFileRealPath)
+			if err == nil {
+				fmt.Printf(" * ITERATING FILES; FOUND LOCK FIlE, JUMPING OUT OF CURRENT WALK ITEM\n")
+				return nil
+			}
+
+			fmt.Printf(" *** filebase contains: %+v\n", fileName)
+			filebaseSplit := strings.Split(fileName, ".")
 			fmt.Printf(" *** filebaseSplit contains: %+v\n", filebaseSplit)
 			// If it does not contain an . we just skip the file.
 			if len(filebaseSplit) < 2 {
@@ -287,11 +306,14 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 			}
 
 			n := strings.Join(filebaseSplit[1:], ".")
-			f := fileAndDate{
-				fullPath:        path,
-				filebase:        filebase,
-				nameWithoutDate: n,
-				date:            dateInt,
+			f := fileInfo{
+				fileRealPath:       path,
+				fileName:           fileName,
+				fileDir:            fileDir,
+				copiedFileRealPath: copiedFileRealPath,
+				lockFileRealPath:   lockFileRealPath,
+				nameWithoutDate:    n,
+				dateInName:         dateInt,
 			}
 
 			files = append(files, f)
@@ -299,14 +321,14 @@ func getFilesSorted(logFolder string) ([]fileAndDate, error) {
 			return nil
 		})
 	if err != nil {
-		return []fileAndDate{}, err
+		return []fileInfo{}, err
 	}
 
 	// fmt.Printf("before sort: %+v\n", files)
 
 	// Sort the files
 	sort.SliceStable(files, func(i, j int) bool {
-		return files[i].date < files[j].date
+		return files[i].dateInName < files[j].dateInName
 	})
 
 	return files, nil
