@@ -37,19 +37,6 @@ func main() {
 		return
 	}
 
-	// Get the message template
-	msg, err := readMessageTemplate(*messageFullPath)
-	if err != nil {
-		log.Printf("%v\n", err)
-		os.Exit(1)
-	}
-
-	{
-		// TMP: Just print out the template for verification.
-		m, _ := yaml.Marshal(msg)
-		fmt.Printf("message template: %s\n", m)
-	}
-
 	ticker := time.NewTicker(time.Second * (time.Duration(*checkInterval)))
 	defer ticker.Stop()
 
@@ -87,9 +74,25 @@ func main() {
 
 				if age > *maxFileAge {
 					// TODO: Read the content, and create message with data, and send it here.
-					fmt.Printf(" * file is older than maxAge: %v\n", files[i])
+					fmt.Printf(" * age of file %v, is %v\n", files[i].fileRealPath, age)
+					fmt.Printf(" * file is older than maxAge, sending file to socket: %v\n", files[i].fileRealPath)
 
-					err := sendDeleteFile(msg, files[i], *socketFullPath)
+					// HERE!!!
+					// Get the message template
+					msg, err := readMessageTemplate(*messageFullPath)
+					if err != nil {
+						log.Printf("%v\n", err)
+						os.Exit(1)
+					}
+
+					{
+						// TMP: Just print out the template for verification.
+						m, _ := yaml.Marshal(msg)
+						fmt.Printf("message template: %s\n", m)
+					}
+					// !!!
+
+					err = sendFile(msg, files[i], *socketFullPath)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
@@ -98,25 +101,6 @@ func main() {
 					continue
 				}
 
-				fmt.Printf(" * age of file %v, is %v\n", files[i].fileRealPath, age)
-
-				if i < len(files)-1 {
-					// Since the files are sorted by the time written, we know that if there is
-					// a file with the same name on the next spot it is an older file that we
-					// want to send.
-					if files[i].nameWithoutDate == files[i+1].nameWithoutDate {
-
-						// TODO: Read the content, and create message with data, and send it here.
-						fmt.Printf(" * sending off file: %v\n", files[i])
-
-						err = sendDeleteFile(msg, files[i], *socketFullPath)
-						if err != nil {
-							log.Printf("%v\n", err)
-							os.Exit(1)
-						}
-
-					}
-				}
 			}
 
 		}
@@ -140,25 +124,19 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 				if event.Op == fsnotify.Create {
 					log.Println("************ WRITE file:", event.Name)
 
-					filebase := filepath.Base(event.Name)
+					fileName := filepath.Base(event.Name)
 					fileDir := filepath.Dir(event.Name)
-					fullPath := event.Name
+					realPath := event.Name
 					{
 						// Check if the file is a .copied, or that it got a .copied file,
-						// and if so, delete both
-						// TODO : HERE:
-						// We should probably move this to it's own goroutine, and check over
-						// the files with fsnotify, and that, shall trigger the deletion.
-						// Maybe we allso should rename worked on files with .lock, and if a
-						// lock is held for more than some limit?, we then remove the lock
-						// again since something probably went wrong, so we want to retry.
+						// and if so, delete both .copied and .lock and realPath files.
 						switch {
-						case strings.HasPrefix(filebase, ".copied."):
+						case strings.HasPrefix(fileName, ".copied."):
 							fmt.Println("FOUND .COPIED FILE")
 
 							// Also get the name of the actual log file without the .copied.
-							actualLogFileBase := strings.TrimPrefix(filebase, ".copied.")
-							actualLogFileFullPath := filepath.Join(fileDir, actualLogFileBase)
+							actualLogFileName := strings.TrimPrefix(fileName, ".copied.")
+							actualLogFileFullPath := filepath.Join(fileDir, actualLogFileName)
 
 							// First delete the actual log file.
 							err := os.Remove(actualLogFileFullPath)
@@ -167,14 +145,13 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 							}
 
 							// Then delete the the .copied.<...> file.
-							err = os.Remove(fullPath)
+							err = os.Remove(realPath)
 							if err != nil {
 								log.Printf("error: failed to remove the file .copied file: %v\n", err)
 							}
 
 							// Delete any .lock. files
-							lockFileFullPath := filepath.Join(fileDir, ".lock."+actualLogFileBase)
-
+							lockFileFullPath := filepath.Join(fileDir, ".lock."+actualLogFileName)
 							err = os.Remove(lockFileFullPath)
 							if err != nil {
 								log.Printf("error: failed to remove the .lock file: %v\n", err)
@@ -184,9 +161,7 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 						}
 					}
 				}
-				if event.Op == fsnotify.Create {
-					log.Println("************ CREATE file:", event.Name)
-				}
+
 			case err, ok := <-watcher.Errors:
 				if !ok {
 					return
@@ -205,9 +180,9 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 	return nil
 }
 
-// readSendDeleteFile is a wrapper function for the functions that
+// sendFile is a wrapper function for the functions that
 // will read File, send File and deletes the file.
-func sendDeleteFile(msg []Message, file fileInfo, socketFullPath string) error {
+func sendFile(msg []Message, file fileInfo, socketFullPath string) error {
 
 	// Create a .lock.<..> file
 	//fileDir := filepath.Dir(file.fullPath)
@@ -218,17 +193,27 @@ func sendDeleteFile(msg []Message, file fileInfo, socketFullPath string) error {
 	}
 	fhLock.Close()
 
-	// Append the actual filename to the directory specified in the msg template.
+	// Append the actual filename to the directory specified in the msg template for
+	// both source and destination.
+	// Where source is  msg[0].MethodArgs[0],
+	// and destination is, msg[0].MethodArgs[2]
+	fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
+	fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
 	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.fileName)
 	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], file.fileName)
+	fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
+	fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
+
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
+	// We put the .copied.<...> file name in the "FileName" field of the message. This will instruct Steward
+	// to create this file on the node it originated from when the Request is done. We can then use the existence of this file to know if a file copy was OK or NOT.
 	msg[0].FileName = filepath.Join(".copied." + file.fileName)
-	fmt.Printf("\n DEBUG: file.filebase = %v\n", file.fileName)
+	fmt.Printf(" * DEBUG: Before putting file on socket, fileName = %v\n", file.fileName)
 	err = messageToSocket(socketFullPath, msg)
 	if err != nil {
 		return err
 	}
-	fmt.Printf(" *** put message for file %v on socket\n", file.fileName)
+	fmt.Printf(" *** message for file %v have been put on socket\n", file.fileName)
 
 	return nil
 }
