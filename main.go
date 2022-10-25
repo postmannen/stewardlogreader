@@ -121,9 +121,10 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 				if !ok {
 					return
 				}
-				log.Println("event:", event)
-				if event.Op == fsnotify.Create {
-					log.Println("************ WRITE file:", event.Name)
+				// log.Println("event:", event)
+
+				if event.Op == fsnotify.Chmod {
+					log.Println("info: got fsnotify CREATE event:", event.Name)
 
 					fileName := filepath.Base(event.Name)
 					fileDir := filepath.Dir(event.Name)
@@ -133,7 +134,7 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 						// and if so, delete both .copied and .lock and realPath files.
 						switch {
 						case strings.HasPrefix(fileName, ".copied."):
-							fmt.Println("FOUND .COPIED FILE")
+							log.Printf("info: fsnotify even for .copied file: %v\n", fileName)
 
 							// Also get the name of the actual log file without the .copied.
 							actualLogFileName := strings.TrimPrefix(fileName, ".copied.")
@@ -284,15 +285,13 @@ func getFilesSorted(logFolder string) ([]fileInfo, error) {
 				return nil
 			}
 			// Check if it is a .copied file, and if it is jump out since we don't work on them.
-			_, err = os.Stat(lockFileRealPath)
+			_, err = os.Stat(copiedFileRealPath)
 			if err == nil {
 				fmt.Printf(" * ITERATING FILES; FOUND COPIED FIlE, JUMPING OUT OF CURRENT WALK ITEM\n")
 				return nil
 			}
 
-			fmt.Printf(" *** filebase contains: %+v\n", fileName)
-			filebaseSplit := strings.Split(fileName, ".")
-			fmt.Printf(" *** filebaseSplit contains: %+v\n", filebaseSplit)
+			fmt.Printf(" *** fileName contains: %+v\n", fileName)
 
 			f := fileInfo{
 				fileRealPath:       path,
