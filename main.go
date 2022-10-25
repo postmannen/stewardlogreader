@@ -17,28 +17,59 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TODO:
-//  - If there is a lock file for a file, skip working on the file.
+type server struct {
+	fileState     map[string]fileInfo
+	configuration *configuration
+}
+
+func newServer() *server {
+	configuration := newConfiguration()
+
+	s := server{
+		fileState:     make(map[string]fileInfo),
+		configuration: configuration,
+	}
+
+	return &s
+}
+
+type configuration struct {
+	socketFullPath  string
+	messageFullPath string
+	logFolder       string
+	maxFileAge      int
+	checkInterval   int
+	prefixName      string
+	prefixTimeNow   bool
+}
+
+func newConfiguration() *configuration {
+	c := configuration{}
+	flag.StringVar(&c.socketFullPath, "socketFullPath", "", "the full path to the steward socket file")
+	flag.StringVar(&c.messageFullPath, "messageFullPath", "./message.yaml", "the full path to the message to be used as the template for sending")
+	flag.StringVar(&c.logFolder, "logFolder", "", "the log folder to watch")
+	flag.IntVar(&c.maxFileAge, "maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
+	flag.IntVar(&c.checkInterval, "checkInterval", 5, "the check interval in seconds")
+	flag.StringVar(&c.prefixName, "prefixName", "", "name to be prefixed to the file name")
+	flag.BoolVar(&c.prefixTimeNow, "prefixTimeNow", false, "set to true to prefix the filename with the time the file was piced up for copying")
+
+	flag.Parse()
+
+	return &c
+}
 
 func main() {
-	socketFullPath := flag.String("socketFullPath", "", "the full path to the steward socket file")
-	messageFullPath := flag.String("messageFullPath", "./message.yaml", "the full path to the message to be used as the template for sending")
-	logFolder := flag.String("logFolder", "", "the log folder to watch")
-	maxFileAge := flag.Int("maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
-	checkInterval := flag.Int("checkInterval", 5, "the check interval in seconds")
-	prefixName := flag.String("prefixName", "", "name to be prefixed to the file name")
-	prefixTimeNow := flag.Bool("prefixTimeNow", false, "set to true to prefix the filename with the time the file was piced up for copying")
-	flag.Parse()
+	s := newServer()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	if *socketFullPath == "" {
+	if s.configuration.socketFullPath == "" {
 		log.Printf("error: you need to specify the full path to the socket\n")
 		return
 	}
 
-	ticker := time.NewTicker(time.Second * (time.Duration(*checkInterval)))
+	ticker := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
 	defer ticker.Stop()
 
 	// Start checking for copied files.
@@ -49,7 +80,7 @@ func main() {
 	}
 	defer watcher.Close()
 
-	err = deleteCopiedFilesWatcher(watcher, *logFolder)
+	err = deleteCopiedFilesWatcher(watcher, s.configuration.logFolder)
 	if err != nil {
 		log.Printf("%v\n", err)
 		os.Exit(1)
@@ -58,7 +89,7 @@ func main() {
 	go func() {
 		for ; true; <-ticker.C {
 
-			files, err := getFilesSorted(*logFolder)
+			files, err := getFilesSorted(s.configuration.logFolder)
 			if err != nil {
 				log.Printf("%v\n", err)
 				os.Exit(1)
@@ -73,14 +104,14 @@ func main() {
 					os.Exit(1)
 				}
 
-				if age > *maxFileAge {
+				if age > s.configuration.maxFileAge {
 					// TODO: Read the content, and create message with data, and send it here.
 					fmt.Printf(" * age of file %v, is %v\n", files[i].fileRealPath, age)
 					fmt.Printf(" * file is older than maxAge, sending file to socket: %v\n", files[i].fileRealPath)
 
 					// HERE!!!
 					// Get the message template
-					msg, err := readMessageTemplate(*messageFullPath)
+					msg, err := readMessageTemplate(s.configuration.messageFullPath)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
@@ -93,7 +124,7 @@ func main() {
 					}
 					// !!!
 
-					err = sendFile(msg, files[i], *socketFullPath, *prefixName, *prefixTimeNow)
+					err = sendFile(msg, files[i], s.configuration.socketFullPath, s.configuration.prefixName, s.configuration.prefixTimeNow)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
