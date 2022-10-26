@@ -8,7 +8,7 @@
     #- "/Users/bt/Documents/raalabs/stewardlogreader/logs-copied"
     - "/Users/bt/Documents/raalabs/stewardlogreader/logs-copied"
     - "500000"
-    - "20"
+    - "200"
   methodTimeout: 10
   replyMethod: REQToFile
   toNodes:

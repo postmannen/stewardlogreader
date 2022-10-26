@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -9,7 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,8 +18,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var errIsDir = errors.New("is directory")
+
 type server struct {
-	fileState     map[string]fileInfo
+	fileState     *fileState
 	configuration *configuration
 }
 
@@ -26,18 +29,70 @@ func newServer() *server {
 	configuration := newConfiguration()
 
 	s := server{
-		fileState:     make(map[string]fileInfo),
+		fileState:     newFileState(),
 		configuration: configuration,
 	}
 
 	return &s
 }
 
+type fileStatus int
+
+const (
+	statusLocked fileStatus = iota + 100
+	statusCopied
+)
+
+type fileState struct {
+	mu sync.Mutex
+	m  map[string]fileInfo
+}
+
+func newFileState() *fileState {
+	f := fileState{
+		m: make(map[string]fileInfo),
+	}
+
+	return &f
+}
+
+type fileInfo struct {
+	fileRealPath string
+	fileName     string
+	fileDir      string
+	modTime      int64
+	fileStatus   fileStatus
+}
+
+func newFileInfo(realPath string) (fileInfo, error) {
+	fileName := filepath.Base(realPath)
+	fileDir := filepath.Dir(realPath)
+
+	inf, err := os.Stat(realPath)
+	if err != nil {
+		return fileInfo{}, fmt.Errorf("error: newFileInfo: os.Stat failed: %v", err)
+	}
+
+	if inf.IsDir() {
+		return fileInfo{}, errIsDir
+	}
+
+	fi := fileInfo{
+		fileRealPath: realPath,
+		fileName:     fileName,
+		fileDir:      fileDir,
+		modTime:      inf.ModTime().Unix(),
+	}
+
+	return fi, nil
+}
+
 type configuration struct {
 	socketFullPath  string
 	messageFullPath string
+	repliesFolder   string
 	logFolder       string
-	maxFileAge      int
+	maxFileAge      int64
 	checkInterval   int
 	prefixName      string
 	prefixTimeNow   bool
@@ -47,8 +102,9 @@ func newConfiguration() *configuration {
 	c := configuration{}
 	flag.StringVar(&c.socketFullPath, "socketFullPath", "", "the full path to the steward socket file")
 	flag.StringVar(&c.messageFullPath, "messageFullPath", "./message.yaml", "the full path to the message to be used as the template for sending")
+	flag.StringVar(&c.repliesFolder, "repliesFolder", "", "the folder where steward will deliver reply messages")
 	flag.StringVar(&c.logFolder, "logFolder", "", "the log folder to watch")
-	flag.IntVar(&c.maxFileAge, "maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
+	flag.Int64Var(&c.maxFileAge, "maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
 	flag.IntVar(&c.checkInterval, "checkInterval", 5, "the check interval in seconds")
 	flag.StringVar(&c.prefixName, "prefixName", "", "name to be prefixed to the file name")
 	flag.BoolVar(&c.prefixTimeNow, "prefixTimeNow", false, "set to true to prefix the filename with the time the file was piced up for copying")
@@ -69,47 +125,64 @@ func main() {
 		return
 	}
 
-	ticker := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
-	defer ticker.Stop()
-
 	// Start checking for copied files.
 	// Create new watcher.
-	watcher, err := fsnotify.NewWatcher()
+	logWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer watcher.Close()
+	defer logWatcher.Close()
 
-	err = deleteCopiedFilesWatcher(watcher, s.configuration.logFolder)
+	err = s.startLogsWatcher(logWatcher)
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
+	repliesWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer repliesWatcher.Close()
+
+	err = s.startRepliesWatcher(repliesWatcher)
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
+	err = s.getInitialFiles()
 	if err != nil {
 		log.Printf("%v\n", err)
 		os.Exit(1)
 	}
 
 	go func() {
+		// Ticker the interval for when to check for files.
+		ticker := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
+		defer ticker.Stop()
+
 		for ; true; <-ticker.C {
 
-			files, err := getFilesSorted(s.configuration.logFolder)
-			if err != nil {
-				log.Printf("%v\n", err)
-				os.Exit(1)
-			}
+			timeNow := time.Now().Unix()
 
-			for i := range files {
-				fmt.Println()
+			for k, v := range s.fileState.m {
 
-				age, err := fileIsHowOld(files[i].fileRealPath)
-				if err != nil {
-					log.Printf("%v\n", err)
-					os.Exit(1)
+				// If file already is in statusLocked ?
+				if v.fileStatus == statusLocked {
+					continue
 				}
 
+				age := timeNow - v.modTime
 				if age > s.configuration.maxFileAge {
-					// TODO: Read the content, and create message with data, and send it here.
-					fmt.Printf(" * age of file %v, is %v\n", files[i].fileRealPath, age)
-					fmt.Printf(" * file is older than maxAge, sending file to socket: %v\n", files[i].fileRealPath)
+					fmt.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
 
-					// HERE!!!
+					// update the fileStatus filed of fileInfo, and also update the map element for the path.
+					v.fileStatus = statusLocked
+					s.fileState.mu.Lock()
+					s.fileState.m[k] = v
+					s.fileState.mu.Unlock()
+
 					// Get the message template
 					msg, err := readMessageTemplate(s.configuration.messageFullPath)
 					if err != nil {
@@ -117,14 +190,13 @@ func main() {
 						os.Exit(1)
 					}
 
-					{
-						// TMP: Just print out the template for verification.
-						m, _ := yaml.Marshal(msg)
-						fmt.Printf("message template: %s\n", m)
-					}
-					// !!!
+					// {
+					// 	// TMP: Just print out the template for verification.
+					// 	m, _ := yaml.Marshal(msg)
+					// 	fmt.Printf("message template: %s\n", m)
+					// }
 
-					err = sendFile(msg, files[i], s.configuration.socketFullPath, s.configuration.prefixName, s.configuration.prefixTimeNow)
+					err = s.sendFile(msg, v)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
@@ -142,7 +214,7 @@ func main() {
 
 }
 
-func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error {
+func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 
 	// Start listening for events.
 	go func() {
@@ -155,44 +227,21 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 				// log.Println("event:", event)
 
 				if event.Op == fsnotify.Chmod {
-					log.Println("info: got fsnotify CREATE event:", event.Name)
+					log.Println("info: got fsnotify ChMOD event:", event.Name)
 
-					fileName := filepath.Base(event.Name)
-					fileDir := filepath.Dir(event.Name)
-					realPath := event.Name
-					{
-						// Check if the file is a .copied, or that it got a .copied file,
-						// and if so, delete both .copied and .lock and realPath files.
-						switch {
-						case strings.HasPrefix(fileName, ".copied."):
-							log.Printf("info: fsnotify even for .copied file: %v\n", fileName)
-
-							// Also get the name of the actual log file without the .copied.
-							actualLogFileName := strings.TrimPrefix(fileName, ".copied.")
-							actualLogFileFullPath := filepath.Join(fileDir, actualLogFileName)
-
-							// First delete the actual log file.
-							err := os.Remove(actualLogFileFullPath)
-							if err != nil {
-								log.Printf("error: failed to remove the file actual log file: %v\n", err)
-							}
-
-							// Then delete the the .copied.<...> file.
-							err = os.Remove(realPath)
-							if err != nil {
-								log.Printf("error: failed to remove the file .copied file: %v\n", err)
-							}
-
-							// Delete any .lock. files
-							lockFileFullPath := filepath.Join(fileDir, ".lock."+actualLogFileName)
-							err = os.Remove(lockFileFullPath)
-							if err != nil {
-								log.Printf("error: failed to remove the .lock file: %v\n", err)
-							}
-							fmt.Printf("successfully delete lock file: %v\n", lockFileFullPath)
-
-						}
+					fileInfo, err := newFileInfo(event.Name)
+					if err != nil {
+						log.Printf("error: failed to newFileInfo for path: %v\n", err)
+						continue
 					}
+
+					// Add or update the information for thefile in the map.
+					s.fileState.mu.Lock()
+					s.fileState.m[event.Name] = fileInfo
+					s.fileState.mu.Unlock()
+
+					fmt.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
+
 				}
 
 			case err, ok := <-watcher.Errors:
@@ -205,7 +254,67 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 	}()
 
 	// Add a path.
-	err := watcher.Add(logFolder)
+	err := watcher.Add(s.configuration.logFolder)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return nil
+}
+
+func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
+
+	// Start listening for events.
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+
+				if event.Op == fsnotify.Chmod {
+					log.Println("info: startRepliesWatcher: got fsnotify ChMOD event:", event.Name)
+
+					// HERE !!!!!!! :We need to delete the replies file
+					fileInfoReplyFile, err := newFileInfo(event.Name)
+					if err != nil {
+						log.Printf("error: failed to newFileInfo for path: %v\n", err)
+						continue
+					}
+
+					// Get the path of the actual file in the logs folder
+					actualFileRealPath := filepath.Join(s.configuration.logFolder, fileInfoReplyFile.fileName)
+
+					err = os.Remove(fileInfoReplyFile.fileRealPath)
+					if err != nil {
+						log.Printf("error: failed to remove reply folder file: %v\n", err)
+					}
+
+					err = os.Remove(actualFileRealPath)
+					if err != nil {
+						log.Printf("error: failed to remove actual file: %v\n", err)
+					}
+					// Add or update the information for thefile in the map.
+					s.fileState.mu.Lock()
+					delete(s.fileState.m, actualFileRealPath)
+					s.fileState.mu.Unlock()
+
+					fmt.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfoReplyFile)
+
+				}
+
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+	}()
+
+	// Add a path.
+	err := watcher.Add(s.configuration.repliesFolder)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -215,16 +324,7 @@ func deleteCopiedFilesWatcher(watcher *fsnotify.Watcher, logFolder string) error
 
 // sendFile is a wrapper function for the functions that
 // will read File, send File and deletes the file.
-func sendFile(msg []Message, file fileInfo, socketFullPath string, prefixName string, prefixTimeNow bool) error {
-
-	// Create a .lock.<..> file
-	//fileDir := filepath.Dir(file.fullPath)
-	//lockFileRealPath := filepath.Join(fileDir, ".lock."+file.fileName)
-	fhLock, err := os.Create(file.lockFileRealPath)
-	if err != nil {
-		return fmt.Errorf("error: failed to create lock file: %v", err)
-	}
-	fhLock.Close()
+func (s *server) sendFile(msg []Message, file fileInfo) error {
 
 	// Append the actual filename to the directory specified in the msg template for
 	// both source and destination.
@@ -234,10 +334,10 @@ func sendFile(msg []Message, file fileInfo, socketFullPath string, prefixName st
 	timeNow := strconv.Itoa(int(time.Now().Unix()))
 	var prefix string
 	switch {
-	case prefixName == "" && prefixTimeNow:
+	case s.configuration.prefixName == "" && s.configuration.prefixTimeNow:
 		prefix = fmt.Sprintf("%s-", timeNow)
-	case prefixName != "" && prefixTimeNow:
-		prefix = fmt.Sprintf("%s-%s-", timeNow, prefixName)
+	case s.configuration.prefixName != "" && s.configuration.prefixTimeNow:
+		prefix = fmt.Sprintf("%s-%s-", timeNow, s.configuration.prefixName)
 	}
 
 	fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
@@ -250,9 +350,10 @@ func sendFile(msg []Message, file fileInfo, socketFullPath string, prefixName st
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
 	// We put the .copied.<...> file name in the "FileName" field of the message. This will instruct Steward
 	// to create this file on the node it originated from when the Request is done. We can then use the existence of this file to know if a file copy was OK or NOT.
-	msg[0].FileName = filepath.Join(".copied." + file.fileName)
+	msg[0].Directory = s.configuration.repliesFolder
+	msg[0].FileName = file.fileName
 	fmt.Printf(" * DEBUG: Before putting file on socket, fileName = %v\n", file.fileName)
-	err = messageToSocket(socketFullPath, msg)
+	err := messageToSocket(s.configuration.socketFullPath, msg)
 	if err != nil {
 		return err
 	}
@@ -261,88 +362,35 @@ func sendFile(msg []Message, file fileInfo, socketFullPath string, prefixName st
 	return nil
 }
 
-// fileIsHowOld will return how old a file is in minutes.
-func fileIsHowOld(fileName string) (int, error) {
-	fi, err := os.Stat(fileName)
-	if err != nil {
-		return 0, fmt.Errorf("error: fileIshowOld os.Stat failed: %v", err)
-	}
+// getInitialFiles will look up all the files in the given folder,
+func (s *server) getInitialFiles() error {
 
-	modTime := (time.Now().Unix() - fi.ModTime().Unix())
-	return int(modTime), nil
-}
-
-type fileInfo struct {
-	fileRealPath       string
-	fileName           string
-	fileDir            string
-	lockFileRealPath   string
-	copiedFileRealPath string
-}
-
-// getFilesSorted will look up all the files in the given folder,
-// and return a list of files found sorted.
-func getFilesSorted(logFolder string) ([]fileInfo, error) {
-
-	// Get the names of all the log files.
-	files := []fileInfo{}
-
-	err := filepath.Walk(logFolder,
+	err := filepath.Walk(s.configuration.logFolder,
 		func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
 			fmt.Println(path, info.Size())
 
-			fileName := filepath.Base(path)
-
-			fi, err := os.Stat(path)
-			if err != nil {
-				return fmt.Errorf("error: failed to stat filbase: %v", path)
-			}
-			if fi.IsDir() {
-				log.Printf(" * info: is directory, doing nothing: %v\n", fileName)
+			f, err := newFileInfo(path)
+			if err != nil && err == errIsDir {
 				return nil
 			}
-
-			fileDir := filepath.Dir(path)
-			copiedFileRealPath := filepath.Join(fileDir, ".copied."+fileName)
-			lockFileRealPath := filepath.Join(fileDir, ".lock."+fileName)
-
-			// Check if it is a .lock file, and if it is jump out since we don't work on them.
-			_, err = os.Stat(lockFileRealPath)
-			if err == nil {
-				fmt.Printf(" * ITERATING FILES; FOUND LOCK FIlE, JUMPING OUT OF CURRENT WALK ITEM\n")
-				return nil
-			}
-			// Check if it is a .copied file, and if it is jump out since we don't work on them.
-			_, err = os.Stat(copiedFileRealPath)
-			if err == nil {
-				fmt.Printf(" * ITERATING FILES; FOUND COPIED FIlE, JUMPING OUT OF CURRENT WALK ITEM\n")
-				return nil
+			if err != nil && err != errIsDir {
+				return err
 			}
 
-			fmt.Printf(" *** fileName contains: %+v\n", fileName)
-
-			f := fileInfo{
-				fileRealPath:       path,
-				fileName:           fileName,
-				fileDir:            fileDir,
-				copiedFileRealPath: copiedFileRealPath,
-				lockFileRealPath:   lockFileRealPath,
-			}
-
-			files = append(files, f)
+			s.fileState.mu.Lock()
+			s.fileState.m[path] = f
+			s.fileState.mu.Unlock()
 
 			return nil
 		})
 	if err != nil {
-		return []fileInfo{}, err
+		return err
 	}
 
-	// fmt.Printf("before sort: %+v\n", files)
-
-	return files, nil
+	return nil
 }
 
 // messageToSocket will write the message to the steward unix socket.
