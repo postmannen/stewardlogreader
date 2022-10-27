@@ -18,6 +18,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TODO:
+// - Create verification checks that folders given in flags do exist.
+// - If the "replies" folder don't exist, let the program create it.
+
 var errIsDir = errors.New("is directory")
 
 type server struct {
@@ -226,7 +230,7 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 				}
 				// log.Println("event:", event)
 
-				if event.Op == fsnotify.Chmod {
+				if event.Op == fsnotify.Write {
 					log.Println("info: got fsnotify ChMOD event:", event.Name)
 
 					fileInfo, err := newFileInfo(event.Name)
@@ -273,10 +277,9 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 					return
 				}
 
-				if event.Op == fsnotify.Chmod {
-					log.Println("info: startRepliesWatcher: got fsnotify ChMOD event:", event.Name)
+				if event.Op == fsnotify.Create {
+					log.Println("info: startRepliesWatcher: got fsnotify CHMOD event:", event.Name)
 
-					// HERE !!!!!!! :We need to delete the replies file
 					fileInfoReplyFile, err := newFileInfo(event.Name)
 					if err != nil {
 						log.Printf("error: failed to newFileInfo for path: %v\n", err)
@@ -286,21 +289,24 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 					// Get the path of the actual file in the logs folder
 					actualFileRealPath := filepath.Join(s.configuration.logFolder, fileInfoReplyFile.fileName)
 
-					err = os.Remove(fileInfoReplyFile.fileRealPath)
-					if err != nil {
-						log.Printf("error: failed to remove reply folder file: %v\n", err)
-					}
+					_ = os.Remove(fileInfoReplyFile.fileRealPath)
+					// if err != nil {
+					// 	//log.Printf("error: failed to remove reply folder file: %v\n", err)
+					// }
 
-					err = os.Remove(actualFileRealPath)
-					if err != nil {
-						log.Printf("error: failed to remove actual file: %v\n", err)
-					}
+					_ = os.Remove(actualFileRealPath)
+					// if err != nil {
+					// 	log.Printf("error: failed to remove actual file: %v\n", err)
+					// }
+
 					// Add or update the information for thefile in the map.
 					s.fileState.mu.Lock()
 					delete(s.fileState.m, actualFileRealPath)
 					s.fileState.mu.Unlock()
 
-					fmt.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfoReplyFile)
+					// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
+
+					//}
 
 				}
 
@@ -340,8 +346,8 @@ func (s *server) sendFile(msg []Message, file fileInfo) error {
 		prefix = fmt.Sprintf("%s-%s-", timeNow, s.configuration.prefixName)
 	}
 
-	fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
-	fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
+	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
+	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
 	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.fileName)
 	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], prefix+file.fileName)
 	fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
