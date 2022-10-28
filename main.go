@@ -255,11 +255,11 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 				}
 				// log.Println("event:", event)
 
-				if event.Op == fsnotify.Write {
-					log.Println("info: got fsnotify ChMOD event:", event.Name)
+				if event.Op == notifyOp {
+					log.Println("info: got fsnotify CHMOD event:", event.Name)
 
 					fileInfo, err := newFileInfo(event.Name)
-					if err != nil {
+					if err != nil && err != errIsDir {
 						log.Printf("error: failed to newFileInfo for path: %v\n", err)
 						continue
 					}
@@ -304,7 +304,8 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 
 				// Use Create for Linux
 				// Use Chmod for mac
-				if event.Op == fsnotify.Create {
+
+				if event.Op == notifyOp {
 					log.Println("info: startRepliesWatcher: got fsnotify CHMOD event:", event.Name)
 
 					fileInfoReplyFile, err := newFileInfo(event.Name)
@@ -377,15 +378,15 @@ func (s *server) sendFile(msg []Message, file fileInfo) error {
 	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
 	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.fileName)
 	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], prefix+file.fileName)
-	fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
-	fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
+	// fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
+	// fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
 
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
 	// We put the .copied.<...> file name in the "FileName" field of the message. This will instruct Steward
 	// to create this file on the node it originated from when the Request is done. We can then use the existence of this file to know if a file copy was OK or NOT.
 	msg[0].Directory = s.configuration.repliesFolder
 	msg[0].FileName = file.fileName
-	fmt.Printf(" * DEBUG: Before putting file on socket, fileName = %v\n", file.fileName)
+
 	err := messageToSocket(s.configuration.socketFullPath, msg)
 	if err != nil {
 		return err
