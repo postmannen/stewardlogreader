@@ -29,15 +29,18 @@ type server struct {
 	configuration *configuration
 }
 
-func newServer() *server {
-	configuration := newConfiguration()
+func newServer() (*server, error) {
+	configuration, err := newConfiguration()
+	if err != nil {
+		return &server{}, err
+	}
 
 	s := server{
 		fileState:     newFileState(),
 		configuration: configuration,
 	}
 
-	return &s
+	return &s, nil
 }
 
 type fileStatus int
@@ -102,10 +105,10 @@ type configuration struct {
 	prefixTimeNow   bool
 }
 
-func newConfiguration() *configuration {
+func newConfiguration() (*configuration, error) {
 	c := configuration{}
 	flag.StringVar(&c.socketFullPath, "socketFullPath", "", "the full path to the steward socket file")
-	flag.StringVar(&c.messageFullPath, "messageFullPath", "./message.yaml", "the full path to the message to be used as the template for sending")
+	flag.StringVar(&c.messageFullPath, "messageFullPath", "./message-template.yaml", "the full path to the message to be used as the template for sending")
 	flag.StringVar(&c.repliesFolder, "repliesFolder", "", "the folder where steward will deliver reply messages")
 	flag.StringVar(&c.logFolder, "logFolder", "", "the log folder to watch")
 	flag.Int64Var(&c.maxFileAge, "maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
@@ -115,19 +118,41 @@ func newConfiguration() *configuration {
 
 	flag.Parse()
 
-	return &c
+	if c.socketFullPath == "" {
+		return &configuration{}, fmt.Errorf("error: you need to specify the full path to the socket")
+	}
+
+	_, err := os.Stat(c.messageFullPath)
+	if err != nil {
+		return &configuration{}, fmt.Errorf("error: could not find file: %v", err)
+	}
+
+	_, err = os.Stat(c.repliesFolder)
+	if err != nil {
+		fmt.Printf("error: could not find replies folder, creating it\n")
+		os.MkdirAll(c.repliesFolder, 0755)
+		if err != nil {
+			return &configuration{}, fmt.Errorf("error: failed to create replies folder: %v", err)
+		}
+	}
+
+	_, err = os.Stat(c.logFolder)
+	if err != nil {
+		return &configuration{}, fmt.Errorf("error: the log folder to watch does not exist: %v", err)
+	}
+
+	return &c, nil
 }
 
 func main() {
-	s := newServer()
+	s, err := newServer()
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	if s.configuration.socketFullPath == "" {
-		log.Printf("error: you need to specify the full path to the socket\n")
-		return
-	}
 
 	// Start checking for copied files.
 	// Create new watcher.
@@ -277,6 +302,8 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 					return
 				}
 
+				// Use Create for Linux
+				// Use Chmod for mac
 				if event.Op == fsnotify.Create {
 					log.Println("info: startRepliesWatcher: got fsnotify CHMOD event:", event.Name)
 
