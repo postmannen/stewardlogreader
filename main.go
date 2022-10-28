@@ -376,7 +376,7 @@ func (s *server) sendFile(msg []Message, file fileInfo) error {
 
 	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
 	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
-	msg[0].MethodArgs[0] = filepath.Join(msg[0].MethodArgs[0], file.fileName)
+	msg[0].MethodArgs[0] = filepath.Join(s.configuration.logFolder, file.fileName)
 	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], prefix+file.fileName)
 	// fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
 	// fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
