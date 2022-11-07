@@ -1,11 +1,11 @@
 ---
 # Fields like Directory and FileName for reply messages will be
 # filled by the program from the flag values provided.
-- method: REQCopySrc
+- method: REQCopySrc ## DONE
   methodArgs:
     # The source folder from where to read files will be taken from flags,
     # so we keep this field empty.
-    - ""
+    - "" ## DONE
     # The destination node to copy files to.
     - central
     # Specify the destination folder for where to copy files on the destination node.

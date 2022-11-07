@@ -95,21 +95,21 @@ func newFileInfo(realPath string) (fileInfo, error) {
 }
 
 type configuration struct {
-	socketFullPath  string
-	messageFullPath string
-	repliesFolder   string
-	logFolder       string
-	maxFileAge      int64
-	checkInterval   int
-	prefixName      string
-	prefixTimeNow   bool
+	socketFullPath   string
+	messageFullPath  string
+	msgRepliesFolder string
+	logFolder        string
+	maxFileAge       int64
+	checkInterval    int
+	prefixName       string
+	prefixTimeNow    bool
 }
 
 func newConfiguration() (*configuration, error) {
 	c := configuration{}
 	flag.StringVar(&c.socketFullPath, "socketFullPath", "", "the full path to the steward socket file")
 	flag.StringVar(&c.messageFullPath, "messageFullPath", "./message-template.yaml", "the full path to the message to be used as the template for sending")
-	flag.StringVar(&c.repliesFolder, "repliesFolder", "", "the folder where steward will deliver reply messages")
+	flag.StringVar(&c.msgRepliesFolder, "msgRepliesFolder", "", "the folder where steward will deliver reply messages")
 	flag.StringVar(&c.logFolder, "logFolder", "", "the log folder to watch")
 	flag.Int64Var(&c.maxFileAge, "maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
 	flag.IntVar(&c.checkInterval, "checkInterval", 5, "the check interval in seconds")
@@ -127,10 +127,10 @@ func newConfiguration() (*configuration, error) {
 		return &configuration{}, fmt.Errorf("error: could not find file: %v", err)
 	}
 
-	_, err = os.Stat(c.repliesFolder)
+	_, err = os.Stat(c.msgRepliesFolder)
 	if err != nil {
 		fmt.Printf("error: could not find replies folder, creating it\n")
-		os.MkdirAll(c.repliesFolder, 0755)
+		os.MkdirAll(c.msgRepliesFolder, 0755)
 		if err != nil {
 			return &configuration{}, fmt.Errorf("error: failed to create replies folder: %v", err)
 		}
@@ -348,7 +348,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 	}()
 
 	// Add a path.
-	err := watcher.Add(s.configuration.repliesFolder)
+	err := watcher.Add(s.configuration.msgRepliesFolder)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -376,6 +376,7 @@ func (s *server) sendFile(msg []Message, file fileInfo) error {
 
 	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
 	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
+	msg[0].Method = "REQCopySrc"
 	msg[0].MethodArgs[0] = filepath.Join(s.configuration.logFolder, file.fileName)
 	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], prefix+file.fileName)
 	// fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
@@ -384,7 +385,7 @@ func (s *server) sendFile(msg []Message, file fileInfo) error {
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
 	// We put the .copied.<...> file name in the "FileName" field of the message. This will instruct Steward
 	// to create this file on the node it originated from when the Request is done. We can then use the existence of this file to know if a file copy was OK or NOT.
-	msg[0].Directory = s.configuration.repliesFolder
+	msg[0].Directory = s.configuration.msgRepliesFolder
 	msg[0].FileName = file.fileName
 
 	err := messageToSocket(s.configuration.socketFullPath, msg)
