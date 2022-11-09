@@ -269,7 +269,6 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 				// log.Println("event:", event)
 
 				if event.Op == notifyOp {
-					log.Println("info: found new file:", event.Name)
 
 					fileInfo, err := newFileInfo(event.Name)
 					if err != nil && err != errIsDir {
@@ -279,6 +278,10 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 
 					// Add or update the information for thefile in the map.
 					s.fileState.mu.Lock()
+					if _, exists := s.fileState.m[event.Name]; !exists {
+						log.Println("info: found new file:", event.Name)
+					}
+
 					s.fileState.m[event.Name] = fileInfo
 					s.fileState.mu.Unlock()
 
