@@ -388,6 +388,8 @@ func (s *server) sendFile(file fileInfo) error {
 		prefix = fmt.Sprintf("%s-", timeNow)
 	case s.configuration.prefixName != "" && s.configuration.prefixTimeNow:
 		prefix = fmt.Sprintf("%s-%s-", timeNow, s.configuration.prefixName)
+	case s.configuration.prefixName != "" && !s.configuration.prefixTimeNow:
+		prefix = fmt.Sprintf("%s-", s.configuration.prefixName)
 	}
 
 	m := Message{
