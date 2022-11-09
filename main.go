@@ -96,21 +96,33 @@ func newFileInfo(realPath string) (fileInfo, error) {
 
 type configuration struct {
 	socketFullPath   string
-	messageFullPath  string
 	msgRepliesFolder string
-	logFolder        string
-	maxFileAge       int64
-	checkInterval    int
-	prefixName       string
-	prefixTimeNow    bool
+	msgToNode        string
+
+	copySrcFolder       string
+	copyDstToNode       string
+	copyDstFolder       string
+	copyChunkSize       string
+	copyMaxTransferTime string
+
+	maxFileAge    int64
+	checkInterval int
+	prefixName    string
+	prefixTimeNow bool
 }
 
 func newConfiguration() (*configuration, error) {
 	c := configuration{}
 	flag.StringVar(&c.socketFullPath, "socketFullPath", "", "the full path to the steward socket file")
-	flag.StringVar(&c.messageFullPath, "messageFullPath", "./message-template.yaml", "the full path to the message to be used as the template for sending")
-	flag.StringVar(&c.msgRepliesFolder, "msgRepliesFolder", "", "the folder where steward will deliver reply messages")
-	flag.StringVar(&c.logFolder, "logFolder", "", "the log folder to watch")
+	flag.StringVar(&c.msgRepliesFolder, "msgRepliesFolder", "", "the folder where steward will deliver reply messages for when the dst node have received the copy request")
+	flag.StringVar(&c.msgToNode, "msgToNode", "", "the name of the (this) local steward instance where we inject messages on the socket")
+
+	flag.StringVar(&c.copySrcFolder, "copySrcFolder", "", "the folder to watch")
+	flag.StringVar(&c.copyDstToNode, "copyDstToNode", "", "the node to send the messages created to")
+	flag.StringVar(&c.copyDstFolder, "copyDstFolder", "", "the folder at the destination to write files to.")
+	flag.StringVar(&c.copyChunkSize, "copyChunkSize", "", "the chunk size to split files into while copying")
+	flag.StringVar(&c.copyMaxTransferTime, "copyMaxTransferTime", "", "the max time a copy transfer operation are allowed to take in seconds")
+
 	flag.Int64Var(&c.maxFileAge, "maxFileAge", 60, "how old a single file is allowed to be in seconds before it gets read and sent to the steward socket")
 	flag.IntVar(&c.checkInterval, "checkInterval", 5, "the check interval in seconds")
 	flag.StringVar(&c.prefixName, "prefixName", "", "name to be prefixed to the file name")
@@ -121,13 +133,27 @@ func newConfiguration() (*configuration, error) {
 	if c.socketFullPath == "" {
 		return &configuration{}, fmt.Errorf("error: you need to specify the full path to the socket")
 	}
-
-	_, err := os.Stat(c.messageFullPath)
-	if err != nil {
-		return &configuration{}, fmt.Errorf("error: could not find file: %v", err)
+	if c.msgRepliesFolder == "" {
+		return &configuration{}, fmt.Errorf("error: you need to specify the msgRepliesFolder")
+	}
+	if c.msgToNode == "" {
+		return &configuration{}, fmt.Errorf("error: you need to specify the msgToNode")
 	}
 
-	_, err = os.Stat(c.msgRepliesFolder)
+	if c.copyDstToNode == "" {
+		return &configuration{}, fmt.Errorf("error: you need to specify the copyDstToNode flag")
+	}
+	if c.copyDstFolder == "" {
+		return &configuration{}, fmt.Errorf("error: you need to specify the copyDstFolder flag")
+	}
+	if c.copyChunkSize == "" {
+		return &configuration{}, fmt.Errorf("error: you need to specify the copyChunkSize flag")
+	}
+	if c.copyMaxTransferTime == "" {
+		return &configuration{}, fmt.Errorf("error: you need to specify the copyMaxTransferTime flag")
+	}
+
+	_, err := os.Stat(c.msgRepliesFolder)
 	if err != nil {
 		fmt.Printf("error: could not find replies folder, creating it\n")
 		os.MkdirAll(c.msgRepliesFolder, 0755)
@@ -136,9 +162,9 @@ func newConfiguration() (*configuration, error) {
 		}
 	}
 
-	_, err = os.Stat(c.logFolder)
+	_, err = os.Stat(c.copySrcFolder)
 	if err != nil {
-		return &configuration{}, fmt.Errorf("error: the log folder to watch does not exist: %v", err)
+		return &configuration{}, fmt.Errorf("error: the source folder to watch does not exist: %v", err)
 	}
 
 	return &c, nil
@@ -204,7 +230,7 @@ func main() {
 
 				age := timeNow - v.modTime
 				if age > s.configuration.maxFileAge {
-					fmt.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
+					log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
 
 					// update the fileStatus filed of fileInfo, and also update the map element for the path.
 					v.fileStatus = statusLocked
@@ -212,20 +238,7 @@ func main() {
 					s.fileState.m[k] = v
 					s.fileState.mu.Unlock()
 
-					// Get the message template
-					msg, err := readMessageTemplate(s.configuration.messageFullPath)
-					if err != nil {
-						log.Printf("%v\n", err)
-						os.Exit(1)
-					}
-
-					// {
-					// 	// TMP: Just print out the template for verification.
-					// 	m, _ := yaml.Marshal(msg)
-					// 	fmt.Printf("message template: %s\n", m)
-					// }
-
-					err = s.sendFile(msg, v)
+					err = s.sendFile(v)
 					if err != nil {
 						log.Printf("%v\n", err)
 						os.Exit(1)
@@ -256,7 +269,7 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 				// log.Println("event:", event)
 
 				if event.Op == notifyOp {
-					log.Println("info: got fsnotify CHMOD event:", event.Name)
+					log.Println("info: found new file:", event.Name)
 
 					fileInfo, err := newFileInfo(event.Name)
 					if err != nil && err != errIsDir {
@@ -269,7 +282,7 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 					s.fileState.m[event.Name] = fileInfo
 					s.fileState.mu.Unlock()
 
-					fmt.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
+					// log.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
 
 				}
 
@@ -283,7 +296,7 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 	}()
 
 	// Add a path.
-	err := watcher.Add(s.configuration.logFolder)
+	err := watcher.Add(s.configuration.copySrcFolder)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -306,7 +319,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 				// Use Chmod for mac
 
 				if event.Op == notifyOp {
-					log.Println("info: startRepliesWatcher: got fsnotify CHMOD event:", event.Name)
+					log.Println("info: got reply message:", event.Name)
 
 					fileInfoReplyFile, err := newFileInfo(event.Name)
 					if err != nil {
@@ -315,7 +328,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 					}
 
 					// Get the path of the actual file in the logs folder
-					actualFileRealPath := filepath.Join(s.configuration.logFolder, fileInfoReplyFile.fileName)
+					actualFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.fileName)
 
 					_ = os.Remove(fileInfoReplyFile.fileRealPath)
 					// if err != nil {
@@ -358,7 +371,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 
 // sendFile is a wrapper function for the functions that
 // will read File, send File and deletes the file.
-func (s *server) sendFile(msg []Message, file fileInfo) error {
+func (s *server) sendFile(file fileInfo) error {
 
 	// Append the actual filename to the directory specified in the msg template for
 	// both source and destination.
@@ -374,25 +387,31 @@ func (s *server) sendFile(msg []Message, file fileInfo) error {
 		prefix = fmt.Sprintf("%s-%s-", timeNow, s.configuration.prefixName)
 	}
 
-	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
-	// fmt.Printf(" * DEBUG: BEFORE APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
-	msg[0].Method = "REQCopySrc"
-	msg[0].MethodArgs[0] = filepath.Join(s.configuration.logFolder, file.fileName)
-	msg[0].MethodArgs[2] = filepath.Join(msg[0].MethodArgs[2], prefix+file.fileName)
-	// fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[0]: %v\n", msg[0].MethodArgs[0])
-	// fmt.Printf(" * DEBUG: AFTER APPEND: msg[0].MethodArgs[2]: %v\n", msg[0].MethodArgs[2])
+	m := Message{
+		MethodArgs: make([]string, 5),
+	}
+
+	m.ToNode = Node(s.configuration.msgToNode)
+	m.Method = "REQCopySrc"
+	m.MethodArgs[0] = filepath.Join(s.configuration.copySrcFolder, file.fileName)
+	m.MethodArgs[1] = s.configuration.copyDstToNode
+	m.MethodArgs[2] = filepath.Join(s.configuration.copyDstFolder, prefix+file.fileName)
+	m.MethodArgs[3] = s.configuration.copyChunkSize
+	m.MethodArgs[4] = s.configuration.copyMaxTransferTime
 
 	// Make the correct real path for the .copied file, so we can check for this when we want to delete it.
 	// We put the .copied.<...> file name in the "FileName" field of the message. This will instruct Steward
 	// to create this file on the node it originated from when the Request is done. We can then use the existence of this file to know if a file copy was OK or NOT.
-	msg[0].Directory = s.configuration.msgRepliesFolder
-	msg[0].FileName = file.fileName
+	m.Directory = s.configuration.msgRepliesFolder
+	m.FileName = file.fileName
 
-	err := messageToSocket(s.configuration.socketFullPath, msg)
+	msgs := []Message{m}
+
+	err := messageToSocket(s.configuration.socketFullPath, msgs)
 	if err != nil {
 		return err
 	}
-	fmt.Printf(" *** message for file %v have been put on socket\n", file.fileName)
+	// log.Printf(" *** message for file %v have been put on socket\n", file.fileName)
 
 	return nil
 }
@@ -400,7 +419,7 @@ func (s *server) sendFile(msg []Message, file fileInfo) error {
 // getInitialFiles will look up all the files in the given folder,
 func (s *server) getInitialFiles() error {
 
-	err := filepath.Walk(s.configuration.logFolder,
+	err := filepath.Walk(s.configuration.copySrcFolder,
 		func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err

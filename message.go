@@ -1,13 +1,5 @@
 package main
 
-import (
-	"fmt"
-	"io"
-	"os"
-
-	"gopkg.in/yaml.v3"
-)
-
 type Node string
 type Method string
 
@@ -87,26 +79,4 @@ type Message struct {
 	PreviousMessage *Message
 	// Schedule
 	Schedule []int `json:"schedule" yaml:"schedule"`
-}
-
-// readMessageTemplate from file, and unmarshal it into a message type.
-func readMessageTemplate(messageFullPath string) ([]Message, error) {
-	fh, err := os.Open(messageFullPath)
-	if err != nil {
-		return []Message{}, fmt.Errorf("error: failed to open message template: %v", err)
-	}
-	defer fh.Close()
-
-	b, err := io.ReadAll(fh)
-	if err != nil {
-		return []Message{}, fmt.Errorf("error: failed to read message template file: %v", err)
-	}
-
-	m := []Message{}
-	err = yaml.Unmarshal(b, &m)
-	if err != nil {
-		return []Message{}, fmt.Errorf("error: failed to unmarshal message template: %v", err)
-	}
-
-	return m, nil
 }
