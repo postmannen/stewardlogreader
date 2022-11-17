@@ -71,6 +71,11 @@ type fileInfo struct {
 	fileStatus   fileStatus
 }
 
+// newFile will take the realPath takes a realpath to a file and returns a
+// fileInfo structure  with the information like directory, filename, and
+// last modified time split out in it's own fields, and return that.
+// If an error happens, like that the verification that the file exists fail
+// an empty fileInfo along side the error will be returned.
 func newFileInfo(realPath string) (fileInfo, error) {
 	fileName := filepath.Base(realPath)
 	fileDir := filepath.Dir(realPath)
@@ -109,6 +114,8 @@ type configuration struct {
 	checkInterval int
 	prefixName    string
 	prefixTimeNow bool
+
+	deleteReplies bool
 }
 
 func newConfiguration() (*configuration, error) {
@@ -127,6 +134,8 @@ func newConfiguration() (*configuration, error) {
 	flag.IntVar(&c.checkInterval, "checkInterval", 5, "the check interval in seconds")
 	flag.StringVar(&c.prefixName, "prefixName", "", "name to be prefixed to the file name")
 	flag.BoolVar(&c.prefixTimeNow, "prefixTimeNow", false, "set to true to prefix the filename with the time the file was piced up for copying")
+
+	flag.BoolVar(&c.deleteReplies, "deleteReplies", true, "set to false to not delete the reply messages. Mainly used for debugging purposes")
 
 	flag.Parse()
 
@@ -331,21 +340,25 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 					}
 
 					// Get the path of the actual file in the logs folder
-					actualFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.fileName)
+					copiedFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.fileName)
 
-					_ = os.Remove(fileInfoReplyFile.fileRealPath)
-					// if err != nil {
-					// 	//log.Printf("error: failed to remove reply folder file: %v\n", err)
-					// }
+					// Prepare the file path for eventual reply messages so we can check for them later.
 
-					_ = os.Remove(actualFileRealPath)
-					// if err != nil {
-					// 	log.Printf("error: failed to remove actual file: %v\n", err)
-					// }
+					if s.configuration.deleteReplies {
+						err := os.Remove(fileInfoReplyFile.fileRealPath)
+						if err != nil {
+							log.Printf("error: failed to remove reply folder file: %v\n", err)
+						}
+					}
+
+					err = os.Remove(copiedFileRealPath)
+					if err != nil {
+						log.Printf("error: failed to remove actual file: %v\n", err)
+					}
 
 					// Add or update the information for thefile in the map.
 					s.fileState.mu.Lock()
-					delete(s.fileState.m, actualFileRealPath)
+					delete(s.fileState.m, copiedFileRealPath)
 					s.fileState.mu.Unlock()
 
 					// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
