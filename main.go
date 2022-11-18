@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -69,7 +70,14 @@ type fileInfo struct {
 	fileDir      string
 	modTime      int64
 	fileStatus   fileStatus
+	isCopyError  bool
+	isCopyReply  bool
+	// Holds the filename, but with .copyerror or .copyreply suffix removed
+	actualFileNameToCopy string
 }
+
+const copyReply = ".copyreply"
+const copyError = ".copyerror"
 
 // newFile will take the realPath takes a realpath to a file and returns a
 // fileInfo structure  with the information like directory, filename, and
@@ -89,11 +97,26 @@ func newFileInfo(realPath string) (fileInfo, error) {
 		return fileInfo{}, errIsDir
 	}
 
+	isCopyReply := strings.HasSuffix(realPath, copyReply)
+	isCopyError := strings.HasSuffix(realPath, copyError)
+
+	var actualFileNameToCopy string
+
+	switch {
+	case isCopyReply:
+		actualFileNameToCopy = strings.TrimSuffix(fileName, copyReply)
+	case isCopyError:
+		actualFileNameToCopy = strings.TrimSuffix(fileName, copyError)
+	}
+
 	fi := fileInfo{
-		fileRealPath: realPath,
-		fileName:     fileName,
-		fileDir:      fileDir,
-		modTime:      inf.ModTime().Unix(),
+		fileRealPath:         realPath,
+		fileName:             fileName,
+		fileDir:              fileDir,
+		modTime:              inf.ModTime().Unix(),
+		isCopyReply:          isCopyReply,
+		isCopyError:          isCopyError,
+		actualFileNameToCopy: actualFileNameToCopy,
 	}
 
 	return fi, nil
@@ -285,7 +308,7 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 						continue
 					}
 
-					// Add or update the information for thefile in the map.
+					// Add or update the information for the file in the map.
 					s.fileState.mu.Lock()
 					if _, exists := s.fileState.m[event.Name]; !exists {
 						log.Println("info: found new file:", event.Name)
@@ -331,21 +354,32 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 				// Use Chmod for mac
 
 				if event.Op == notifyOp {
-					log.Println("info: got reply message:", event.Name)
-
 					fileInfoReplyFile, err := newFileInfo(event.Name)
 					if err != nil {
 						log.Printf("error: failed to newFileInfo for path: %v\n", err)
 						continue
 					}
 
-					// Get the path of the actual file in the logs folder
-					copiedFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.fileName)
+					if !fileInfoReplyFile.isCopyReply {
+						// log.Printf("info: file was not a copyreply file\n")
+						continue
+					}
+
+					// Get the realpath of the file in the logs folder
+					copiedFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.actualFileNameToCopy)
 
 					// Prepare the file path for eventual reply messages so we can check for them later.
 
+					log.Printf("info: got copyreply message, copy went ok for: %v\n", fileInfoReplyFile.actualFileNameToCopy)
+
 					if s.configuration.deleteReplies {
 						err := os.Remove(fileInfoReplyFile.fileRealPath)
+						if err != nil {
+							log.Printf("error: failed to remove reply folder file: %v\n", err)
+						}
+
+						fname := filepath.Join(fileInfoReplyFile.fileDir, fileInfoReplyFile.actualFileNameToCopy)
+						err = os.Remove(fname)
 						if err != nil {
 							log.Printf("error: failed to remove reply folder file: %v\n", err)
 						}
