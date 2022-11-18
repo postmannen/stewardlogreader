@@ -202,6 +202,8 @@ func newConfiguration() (*configuration, error) {
 	return &c, nil
 }
 
+var workersCh = make(chan struct{}, 3)
+
 func main() {
 	s, err := newServer()
 	if err != nil {
@@ -253,31 +255,49 @@ func main() {
 
 			timeNow := time.Now().Unix()
 
+			type kv struct {
+				k string
+				v fileInfo
+			}
+
+			kvs := []kv{}
+
+			s.fileState.mu.Lock()
 			for k, v := range s.fileState.m {
+				kvs = append(kvs, kv{k, v})
+			}
+			s.fileState.mu.Unlock()
+
+			for _, kv := range kvs {
 
 				// If file already is in statusLocked ?
-				if v.fileStatus == statusLocked {
+				if kv.v.fileStatus == statusLocked {
 					continue
 				}
 
-				age := timeNow - v.modTime
-				if age > s.configuration.maxFileAge {
-					log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
+				go func(k string, v fileInfo) {
+					age := timeNow - v.modTime
+					if age > s.configuration.maxFileAge {
+						workersCh <- struct{}{}
 
-					// update the fileStatus filed of fileInfo, and also update the map element for the path.
-					v.fileStatus = statusLocked
-					s.fileState.mu.Lock()
-					s.fileState.m[k] = v
-					s.fileState.mu.Unlock()
+						log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
 
-					err = s.sendFile(v)
-					if err != nil {
-						log.Printf("%v\n", err)
-						os.Exit(1)
+						// update the fileStatus filed of fileInfo, and also update the map element for the path.
+						v.fileStatus = statusLocked
+						s.fileState.mu.Lock()
+						s.fileState.m[k] = v
+						s.fileState.mu.Unlock()
+
+						err = s.sendFile(v)
+						if err != nil {
+							log.Printf("%v\n", err)
+							os.Exit(1)
+						}
+
+						<-workersCh
+
 					}
-
-					continue
-				}
+				}(kv.k, kv.v)
 
 			}
 
@@ -304,7 +324,7 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 
 					fileInfo, err := newFileInfo(event.Name)
 					if err != nil && err != errIsDir {
-						log.Printf("error: failed to newFileInfo for path: %v\n", err)
+						log.Printf("error: failed to newFileInfo for fileInfo: %#v, path:%v\n", fileInfo, err)
 						continue
 					}
 
@@ -356,7 +376,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 				if event.Op == notifyOp {
 					fileInfoReplyFile, err := newFileInfo(event.Name)
 					if err != nil {
-						log.Printf("error: failed to newFileInfo for path: %v\n", err)
+						log.Printf("error: failed to newFileInfo for fileinfoReplyFile: %#v, err: %v\n", fileInfoReplyFile, err)
 						continue
 					}
 
