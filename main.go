@@ -501,11 +501,23 @@ func (s *server) getInitialFiles() error {
 
 // messageToSocket will write the message to the steward unix socket.
 func messageToSocket(socketFullPath string, msg []Message) error {
-	socket, err := net.Dial("unix", socketFullPath)
-	if err != nil {
-		return fmt.Errorf("error : could not open socket file for writing: %v", err)
+	var socket net.Conn
+	var err error
+
+	for {
+		socket, err = net.Dial("unix", socketFullPath)
+		if err != nil && !strings.Contains(err.Error(), "connection refused") {
+			return fmt.Errorf("error : could not open socket file for writing: %v", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "connection refused") {
+			fmt.Println("got connection refused, trying again")
+			time.Sleep(time.Millisecond * 1000)
+			continue
+		}
+
+		defer socket.Close()
+		break
 	}
-	defer socket.Close()
 
 	b, err := yaml.Marshal(msg)
 	if err != nil {
