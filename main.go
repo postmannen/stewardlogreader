@@ -202,7 +202,7 @@ func newConfiguration() (*configuration, error) {
 	return &c, nil
 }
 
-var workersCh = make(chan struct{}, 3)
+var maxSendToWorkersCh = make(chan struct{}, 3)
 
 func main() {
 	s, err := newServer()
@@ -278,7 +278,7 @@ func main() {
 				go func(k string, v fileInfo) {
 					age := timeNow - v.modTime
 					if age > s.configuration.maxFileAge {
-						workersCh <- struct{}{}
+						maxSendToWorkersCh <- struct{}{}
 
 						log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
 
@@ -294,7 +294,7 @@ func main() {
 							os.Exit(1)
 						}
 
-						<-workersCh
+						<-maxSendToWorkersCh
 
 					}
 				}(kv.k, kv.v)
@@ -375,8 +375,11 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 
 				if event.Op == notifyOp {
 					fileInfoReplyFile, err := newFileInfo(event.Name)
-					if err != nil {
+					if err != nil && err != errIsDir {
 						log.Printf("error: failed to newFileInfo for fileinfoReplyFile: %#v, err: %v\n", fileInfoReplyFile, err)
+						continue
+					}
+					if err != nil && err == errIsDir {
 						continue
 					}
 
