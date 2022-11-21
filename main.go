@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -202,9 +203,16 @@ func newConfiguration() (*configuration, error) {
 	return &c, nil
 }
 
-var maxSendToWorkersCh = make(chan struct{}, 3)
+// kv represents a key and a value in the map
+type kv struct {
+	k string
+	v fileInfo
+}
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	s, err := newServer()
 	if err != nil {
 		log.Printf("%v\n", err)
@@ -246,62 +254,77 @@ func main() {
 		os.Exit(1)
 	}
 
+	processFileCh := make(chan kv)
+
+	// Check file status at given interval, and start processing if file is old enough.
 	go func() {
 		// Ticker the interval for when to check for files.
 		ticker := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
 		defer ticker.Stop()
 
-		for ; true; <-ticker.C {
+		for {
 
-			timeNow := time.Now().Unix()
+			select {
+			// Loop over the map, and pick the first item that is not in statusLocked
+			case <-ticker.C:
+				// fmt.Println(" * START OF LOOP!")
+				s.fileState.mu.Lock()
+				for k, v := range s.fileState.m {
+					timeNow := time.Now().Unix()
 
-			type kv struct {
-				k string
-				v fileInfo
-			}
-
-			kvs := []kv{}
-
-			s.fileState.mu.Lock()
-			for k, v := range s.fileState.m {
-				kvs = append(kvs, kv{k, v})
-			}
-			s.fileState.mu.Unlock()
-
-			for _, kv := range kvs {
-
-				// If file already is in statusLocked ?
-				if kv.v.fileStatus == statusLocked {
-					continue
-				}
-
-				go func(k string, v fileInfo) {
 					age := timeNow - v.modTime
 					if age > s.configuration.maxFileAge {
-						maxSendToWorkersCh <- struct{}{}
+						// If file already is in statusLocked we just continue looping
+						// to find the next file not already being processed.
+						if v.fileStatus == statusLocked {
+							continue
+						}
 
 						log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
 
-						// update the fileStatus filed of fileInfo, and also update the map element for the path.
-						v.fileStatus = statusLocked
-						s.fileState.mu.Lock()
-						s.fileState.m[k] = v
-						s.fileState.mu.Unlock()
+						// fmt.Println(" * DEBUG 1")
+						age := timeNow - v.modTime
+						if age > s.configuration.maxFileAge {
+							// Update the map element for the file with statusLocked.
+							v.fileStatus = statusLocked
+							s.fileState.m[k] = v
 
-						err = s.sendFile(v)
-						if err != nil {
-							log.Printf("%v\n", err)
-							os.Exit(1)
+							processFileCh <- kv{k, v}
 						}
-
-						<-maxSendToWorkersCh
-
+						// fmt.Println(" * DEBUG 2")
 					}
-				}(kv.k, kv.v)
 
+				}
+				s.fileState.mu.Unlock()
+
+				// fmt.Println(" * DONE WITH LOOP!")
+
+			case <-ctx.Done():
+				return
 			}
 
 		}
+	}()
+
+	go func() {
+
+		// Receive one file at a time.
+		// The file we receive here should not be in lock state, but we
+		// should set the lock state here.
+		for {
+			select {
+			case kv := <-processFileCh:
+				err = s.sendFile(kv.v)
+				if err != nil {
+					log.Printf("%v\n", err)
+					os.Exit(1)
+				}
+			case <-ctx.Done():
+				return
+			}
+
+		}
+
 	}()
 
 	<-sigCh
@@ -324,7 +347,11 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 
 					fileInfo, err := newFileInfo(event.Name)
 					if err != nil && err != errIsDir {
-						log.Printf("error: failed to newFileInfo for fileInfo: %#v, path:%v\n", fileInfo, err)
+						// log.Printf("error: failed to newFileInfo for path: %v\n", err)
+						continue
+					}
+					if err != nil && err == errIsDir {
+						// log.Printf("error: failed to newFileInfo, is dir: %v\n", err)
 						continue
 					}
 
@@ -333,7 +360,6 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 					if _, exists := s.fileState.m[event.Name]; !exists {
 						log.Println("info: found new file:", event.Name)
 					}
-
 					s.fileState.m[event.Name] = fileInfo
 					s.fileState.mu.Unlock()
 
@@ -359,6 +385,10 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 	return nil
 }
 
+// startRepliesWatcher will start a watcher for the specified replies folder.
+// When a reply is received we know that the copy was ok, and the belonging
+// reply files and source files defined in the reply are deleted. The entry
+// for the specific file are also removed from the map.
 func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 
 	// Start listening for events.
@@ -375,11 +405,8 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 
 				if event.Op == notifyOp {
 					fileInfoReplyFile, err := newFileInfo(event.Name)
-					if err != nil && err != errIsDir {
-						log.Printf("error: failed to newFileInfo for fileinfoReplyFile: %#v, err: %v\n", fileInfoReplyFile, err)
-						continue
-					}
-					if err != nil && err == errIsDir {
+					if err != nil {
+						// log.Printf("error: failed to newFileInfo for path: %v\n", err)
 						continue
 					}
 
