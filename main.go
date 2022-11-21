@@ -186,6 +186,8 @@ type configuration struct {
 	prefixTimeNow bool
 
 	deleteReplies bool
+
+	maxCopyProcesses int
 }
 
 func newConfiguration() (*configuration, error) {
@@ -206,6 +208,8 @@ func newConfiguration() (*configuration, error) {
 	flag.BoolVar(&c.prefixTimeNow, "prefixTimeNow", false, "set to true to prefix the filename with the time the file was piced up for copying")
 
 	flag.BoolVar(&c.deleteReplies, "deleteReplies", true, "set to false to not delete the reply messages. Mainly used for debugging purposes")
+
+	flag.IntVar(&c.maxCopyProcesses, "maxCopyProcesses", 5, "max copy processes to run simultaneously")
 
 	flag.Parse()
 
@@ -253,138 +257,6 @@ func newConfiguration() (*configuration, error) {
 type kv struct {
 	k string
 	v fileInfo
-}
-
-func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	s, err := newServer()
-	if err != nil {
-		log.Printf("%v\n", err)
-		os.Exit(1)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	// Start checking for copied files.
-	// Create new watcher.
-	logWatcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer logWatcher.Close()
-
-	err = s.startLogsWatcher(logWatcher)
-	if err != nil {
-		log.Printf("%v\n", err)
-		os.Exit(1)
-	}
-
-	repliesWatcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer repliesWatcher.Close()
-
-	err = s.startRepliesWatcher(repliesWatcher)
-	if err != nil {
-		log.Printf("%v\n", err)
-		os.Exit(1)
-	}
-
-	err = s.getInitialFiles()
-	if err != nil {
-		log.Printf("%v\n", err)
-		os.Exit(1)
-	}
-
-	processFileCh := make(chan kv)
-
-	// Check file status at given interval, and start processing if file is old enough.
-	go func() {
-		// Ticker the interval for when to check for files.
-		ticker := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
-		defer ticker.Stop()
-
-		for {
-
-			select {
-			// Loop over the map, and pick the first item that is not in statusLocked
-			case <-ticker.C:
-				// fmt.Println(" * START OF LOOP!")
-
-				// for k, v := range s.fileState.m {
-				for {
-					kv, ok := s.fileState.nextUnlocked()
-					if !ok {
-						fmt.Println("found no new unlocked items in the map")
-						break
-					}
-					fmt.Printf(" * Got nextUnlocked: %+v\n", kv)
-					// Update the map element for the file with statusLocked.
-					kv.v.fileStatus = statusLocked
-					s.fileState.update(kv)
-
-					// Start up a go routine who will belong to the individual file,
-					// and also be responsible for checking if the file is older than
-					// max age. When the file is older than max age we send it to the
-					// socket.
-					go func() {
-						ticker2 := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
-						defer ticker2.Stop()
-
-						for range ticker2.C {
-							timeNow := time.Now().Unix()
-							age := timeNow - kv.v.modTime
-
-							if age > s.configuration.maxFileAge {
-								log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, kv.v.fileRealPath)
-
-								processFileCh <- kv
-
-								return
-
-								// fmt.Println(" * DEBUG 2")
-							}
-						}
-					}()
-
-				}
-
-				// fmt.Println(" * DONE WITH LOOP!")
-
-			case <-ctx.Done():
-				return
-			}
-
-		}
-	}()
-
-	go func() {
-
-		// Receive one file at a time.
-		// The file we receive here should not be in lock state, but we
-		// should set the lock state here.
-		for {
-			select {
-			case kv := <-processFileCh:
-				err = s.sendFile(kv.v)
-				if err != nil {
-					log.Printf("%v\n", err)
-					os.Exit(1)
-				}
-			case <-ctx.Done():
-				return
-			}
-
-		}
-
-	}()
-
-	<-sigCh
-
 }
 
 func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
@@ -631,4 +503,139 @@ func messageToSocket(socketFullPath string, msg []Message) error {
 	}
 
 	return nil
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s, err := newServer()
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	// Start checking for copied files.
+	// Create new watcher.
+	logWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer logWatcher.Close()
+
+	err = s.startLogsWatcher(logWatcher)
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
+	repliesWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer repliesWatcher.Close()
+
+	err = s.startRepliesWatcher(repliesWatcher)
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
+	err = s.getInitialFiles()
+	if err != nil {
+		log.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
+	processFileCh := make(chan kv)
+	maxCopyProcessesCh := make(chan struct{}, s.configuration.maxCopyProcesses)
+
+	// Check file status at given interval, and start processing if file is old enough.
+	go func() {
+		// Ticker the interval for when to check for files.
+		ticker := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
+		defer ticker.Stop()
+
+		for {
+
+			select {
+			// Loop over the map, and pick the first item that is not in statusLocked
+			case <-ticker.C:
+				// fmt.Println(" * START OF LOOP!")
+
+				// for k, v := range s.fileState.m {
+				for {
+					kv, ok := s.fileState.nextUnlocked()
+					if !ok {
+						fmt.Println("found no new unlocked items in the map")
+						break
+					}
+
+					maxCopyProcessesCh <- struct{}{}
+
+					fmt.Printf(" * Got nextUnlocked: %+v\n", kv)
+					// Update the map element for the file with statusLocked.
+					kv.v.fileStatus = statusLocked
+					s.fileState.update(kv)
+
+					// Start up a go routine who will belong to the individual file,
+					// and also be responsible for checking if the file is older than
+					// max age. When the file is older than max age we send it to the
+					// socket.
+					go func() {
+						ticker2 := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
+						defer ticker2.Stop()
+
+						for range ticker2.C {
+							timeNow := time.Now().Unix()
+							age := timeNow - kv.v.modTime
+
+							if age > s.configuration.maxFileAge {
+								log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, kv.v.fileRealPath)
+
+								processFileCh <- kv
+								<-maxCopyProcessesCh
+
+								return
+
+								// fmt.Println(" * DEBUG 2")
+							}
+						}
+					}()
+
+				}
+
+				// fmt.Println(" * DONE WITH LOOP!")
+
+			case <-ctx.Done():
+				return
+			}
+
+		}
+	}()
+
+	go func() {
+
+		// Receive one file at a time.
+		for {
+			select {
+			case kv := <-processFileCh:
+				err = s.sendFile(kv.v)
+				if err != nil {
+					log.Printf("%v\n", err)
+					os.Exit(1)
+				}
+			case <-ctx.Done():
+				return
+			}
+
+		}
+
+	}()
+
+	<-sigCh
+
 }
