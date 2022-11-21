@@ -49,12 +49,58 @@ type fileStatus int
 
 const (
 	statusLocked fileStatus = iota + 100
-	statusCopied
 )
 
 type fileState struct {
 	mu sync.Mutex
 	m  map[string]fileInfo
+}
+
+// // Handle the map
+// mapUpdateCh := make(chan kv)
+// mapAskForNextUnlockedCh := make(chan struct{})
+// mapDeliverNextUnlockedCh := make(chan kv)
+// mapDeleteElementCh := make(chan kv)
+
+// getNextUnlocked will return the next unlocked field in the map.
+// Will also return a boolean value as 1 if an item was found, or
+// 0 if no unlocked items were found.
+func (f *fileState) nextUnlocked() (kv, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, v := range f.m {
+		if v.fileStatus == statusLocked {
+			continue
+		}
+
+		kv := kv{k, v}
+		return kv, true
+	}
+
+	return kv{}, false
+}
+
+// update will create/update the prived key/value in the map.
+func (f *fileState) update(kv kv) {
+	f.mu.Lock()
+	f.m[kv.k] = kv.v
+	f.mu.Unlock()
+}
+
+// exists will return true if a key element is found in the map.
+func (f *fileState) exists(kv kv) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, exists := f.m[kv.k]
+
+	return exists
+}
+
+func (f *fileState) delete(kv kv) {
+	f.mu.Lock()
+	delete(f.m, kv.k)
+	f.mu.Unlock()
+
 }
 
 func newFileState() *fileState {
@@ -268,34 +314,44 @@ func main() {
 			// Loop over the map, and pick the first item that is not in statusLocked
 			case <-ticker.C:
 				// fmt.Println(" * START OF LOOP!")
-				s.fileState.mu.Lock()
-				for k, v := range s.fileState.m {
-					timeNow := time.Now().Unix()
 
-					age := timeNow - v.modTime
-					if age > s.configuration.maxFileAge {
-						// If file already is in statusLocked we just continue looping
-						// to find the next file not already being processed.
-						if v.fileStatus == statusLocked {
-							continue
-						}
-
-						log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, v.fileRealPath)
-
-						// fmt.Println(" * DEBUG 1")
-						age := timeNow - v.modTime
-						if age > s.configuration.maxFileAge {
-							// Update the map element for the file with statusLocked.
-							v.fileStatus = statusLocked
-							s.fileState.m[k] = v
-
-							processFileCh <- kv{k, v}
-						}
-						// fmt.Println(" * DEBUG 2")
+				// for k, v := range s.fileState.m {
+				for {
+					kv, ok := s.fileState.nextUnlocked()
+					if !ok {
+						fmt.Println("found no new unlocked items in the map")
+						break
 					}
+					fmt.Printf(" * Got nextUnlocked: %+v\n", kv)
+					// Update the map element for the file with statusLocked.
+					kv.v.fileStatus = statusLocked
+					s.fileState.update(kv)
+
+					// Start up a go routine who will belong to the individual file,
+					// and also be responsible for checking if the file is older than
+					// max age. When the file is older than max age we send it to the
+					// socket.
+					go func() {
+						ticker2 := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
+						defer ticker2.Stop()
+
+						for range ticker2.C {
+							timeNow := time.Now().Unix()
+							age := timeNow - kv.v.modTime
+
+							if age > s.configuration.maxFileAge {
+								log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, kv.v.fileRealPath)
+
+								processFileCh <- kv
+
+								return
+
+								// fmt.Println(" * DEBUG 2")
+							}
+						}
+					}()
 
 				}
-				s.fileState.mu.Unlock()
 
 				// fmt.Println(" * DONE WITH LOOP!")
 
@@ -356,12 +412,12 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 					}
 
 					// Add or update the information for the file in the map.
-					s.fileState.mu.Lock()
-					if _, exists := s.fileState.m[event.Name]; !exists {
+
+					if exists := s.fileState.exists(kv{k: event.Name}); !exists {
 						log.Println("info: found new file:", event.Name)
 					}
-					s.fileState.m[event.Name] = fileInfo
-					s.fileState.mu.Unlock()
+
+					s.fileState.update(kv{k: event.Name, v: fileInfo})
 
 					// log.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
 
@@ -440,10 +496,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 						log.Printf("error: failed to remove actual file: %v\n", err)
 					}
 
-					// Add or update the information for thefile in the map.
-					s.fileState.mu.Lock()
-					delete(s.fileState.m, copiedFileRealPath)
-					s.fileState.mu.Unlock()
+					s.fileState.delete(kv{k: copiedFileRealPath})
 
 					// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
 
@@ -536,9 +589,7 @@ func (s *server) getInitialFiles() error {
 				return err
 			}
 
-			s.fileState.mu.Lock()
-			s.fileState.m[path] = f
-			s.fileState.mu.Unlock()
+			s.fileState.update(kv{k: path, v: f})
 
 			return nil
 		})
