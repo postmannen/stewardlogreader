@@ -173,6 +173,8 @@ type configuration struct {
 	socketFullPath   string
 	msgRepliesFolder string
 	msgToNode        string
+	msgACKTimeout    int
+	msgRetries       int
 
 	copySrcFolder       string
 	copyDstToNode       string
@@ -195,6 +197,9 @@ func newConfiguration() (*configuration, error) {
 	flag.StringVar(&c.socketFullPath, "socketFullPath", "", "the full path to the steward socket file")
 	flag.StringVar(&c.msgRepliesFolder, "msgRepliesFolder", "", "the folder where steward will deliver reply messages for when the dst node have received the copy request")
 	flag.StringVar(&c.msgToNode, "msgToNode", "", "the name of the (this) local steward instance where we inject messages on the socket")
+	// ---
+	flag.IntVar(&c.msgACKTimeout, "msgACKTimeout", 5, "how long shall we wait for a steward message timeout in seconds")
+	flag.IntVar(&c.msgRetries, "msgRetries", 5, "the number of retries we want to try sending a message before we give up")
 
 	flag.StringVar(&c.copySrcFolder, "copySrcFolder", "", "the folder to watch")
 	flag.StringVar(&c.copyDstToNode, "copyDstToNode", "", "the node to send the messages created to")
@@ -420,6 +425,9 @@ func (s *server) sendFile(file fileInfo) error {
 
 	m.ToNode = Node(s.configuration.msgToNode)
 	m.Method = "REQCopySrc"
+	m.ACKTimeout = s.configuration.msgACKTimeout
+	m.Retries = s.configuration.msgRetries
+
 	m.MethodArgs[0] = filepath.Join(s.configuration.copySrcFolder, file.fileName)
 	m.MethodArgs[1] = s.configuration.copyDstToNode
 	m.MethodArgs[2] = filepath.Join(s.configuration.copyDstFolder, prefix+file.fileName)
