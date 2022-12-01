@@ -20,17 +20,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TODO:
-// - Create verification checks that folders given in flags do exist.
-// - If the "replies" folder don't exist, let the program create it.
-
 var errIsDir = errors.New("is directory")
 
+// server holds the main structures used for the logreader.
 type server struct {
-	fileState     *fileState
+	allFilesState *allFilesState
 	configuration *configuration
 }
 
+// newServer will prepare and return a *server.
 func newServer() (*server, error) {
 	configuration, err := newConfiguration()
 	if err != nil {
@@ -38,57 +36,77 @@ func newServer() (*server, error) {
 	}
 
 	s := server{
-		fileState:     newFileState(),
+		allFilesState: newAllFilesState(),
 		configuration: configuration,
 	}
 
 	return &s, nil
 }
 
-type fileStatus int
-
-const (
-	statusLocked fileStatus = iota + 100
-)
-
+// fileState holds the variables needed for individial files to
+// be put into lock state and also the context to be able to
+// cancel the timeout if a file have become stale in the system.
 type fileState struct {
-	mu sync.Mutex
-	m  map[string]fileInfo
+	locked bool
+
+	// Context and cancel function for an individial file used
+	// to be able to know when to be able to change a map entry
+	// for a file from locked to unlocked, so the message to
+	// request a file copy can be reinitiated.
+	cancel context.CancelFunc
+	ctx    context.Context
 }
 
-// // Handle the map
-// mapUpdateCh := make(chan kv)
-// mapAskForNextUnlockedCh := make(chan struct{})
-// mapDeliverNextUnlockedCh := make(chan kv)
-// mapDeleteElementCh := make(chan kv)
+// newFileState will prepare and return a *fileState.
+func newFileState(ctx context.Context) *fileState {
+	ctx, cancel := context.WithCancel(ctx)
 
-// getNextUnlocked will return the next unlocked field in the map.
+	fs := fileState{
+		locked: false,
+		cancel: cancel,
+		ctx:    ctx,
+	}
+
+	return &fs
+}
+
+type allFilesState struct {
+	mu sync.Mutex
+	// Map of all the files found, and the state if it is being
+	// worked on by locking it.
+	m map[string]fileInfo
+	// Channel for receving values if we should free up a lock
+	// defined for a file in the map.
+	lockTimeoutCh chan keyValue
+}
+
+// nextUnlocked will return the next unlocked field in the map.
 // Will also return a boolean value as 1 if an item was found, or
 // 0 if no unlocked items were found.
-func (f *fileState) nextUnlocked() (kv, bool) {
+func (f *allFilesState) nextUnlocked() (keyValue, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for k, v := range f.m {
-		if v.fileStatus == statusLocked {
+		if v.fileState.locked {
 			continue
 		}
 
-		kv := kv{k, v}
+		kv := keyValue{k, v}
 		return kv, true
 	}
 
-	return kv{}, false
+	return keyValue{}, false
 }
 
 // update will create/update the prived key/value in the map.
-func (f *fileState) update(kv kv) {
+func (f *allFilesState) update(kv keyValue) {
 	f.mu.Lock()
 	f.m[kv.k] = kv.v
 	f.mu.Unlock()
 }
 
 // exists will return true if a key element is found in the map.
-func (f *fileState) exists(kv kv) bool {
+func (f *allFilesState) exists(kv keyValue) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, exists := f.m[kv.k]
@@ -96,27 +114,39 @@ func (f *fileState) exists(kv kv) bool {
 	return exists
 }
 
-func (f *fileState) delete(kv kv) {
+// delete will delete a key value pair from the map.
+func (f *allFilesState) delete(kv keyValue) {
 	f.mu.Lock()
 	delete(f.m, kv.k)
 	f.mu.Unlock()
 
 }
 
-func newFileState() *fileState {
-	f := fileState{
-		m: make(map[string]fileInfo),
+// cancelTimer will cancel the timer go routine belonging to a file
+// that is used for checking for stale copy processes.
+func (f *allFilesState) cancelTimer(kv keyValue) {
+	f.mu.Lock()
+	f.m[kv.k].fileState.cancel()
+	f.mu.Unlock()
+
+}
+
+func newAllFilesState() *allFilesState {
+	f := allFilesState{
+		m:             make(map[string]fileInfo),
+		lockTimeoutCh: make(chan keyValue),
 	}
 
 	return &f
 }
 
+// fileInfo holds the general information about a file.
 type fileInfo struct {
 	fileRealPath string
 	fileName     string
 	fileDir      string
 	modTime      int64
-	fileStatus   fileStatus
+	fileState    *fileState
 	isCopyError  bool
 	isCopyReply  bool
 	// Holds the filename, but with .copyerror or .copyreply suffix removed
@@ -126,12 +156,12 @@ type fileInfo struct {
 const copyReply = ".copyreply"
 const copyError = ".copyerror"
 
-// newFile will take the realPath takes a realpath to a file and returns a
+// newFileInfo will take the realPath takes a realpath to a file and returns a
 // fileInfo structure  with the information like directory, filename, and
 // last modified time split out in it's own fields, and return that.
 // If an error happens, like that the verification that the file exists fail
 // an empty fileInfo along side the error will be returned.
-func newFileInfo(realPath string) (fileInfo, error) {
+func newFileInfo(ctx context.Context, realPath string) (fileInfo, error) {
 	fileName := filepath.Base(realPath)
 	fileDir := filepath.Dir(realPath)
 
@@ -164,11 +194,14 @@ func newFileInfo(realPath string) (fileInfo, error) {
 		isCopyReply:          isCopyReply,
 		isCopyError:          isCopyError,
 		actualFileNameToCopy: actualFileNameToCopy,
+		//HERE!
+		fileState: newFileState(ctx),
 	}
 
 	return fi, nil
 }
 
+// configuration holds all the general configuration options.
 type configuration struct {
 	socketFullPath   string
 	msgRepliesFolder string
@@ -192,6 +225,8 @@ type configuration struct {
 	maxCopyProcesses int
 }
 
+// newConfiguration will parse all the input flags, check if values
+// have been set correctly, and return a *configuration.
 func newConfiguration() (*configuration, error) {
 	c := configuration{}
 	flag.StringVar(&c.socketFullPath, "socketFullPath", "", "the full path to the steward socket file")
@@ -258,13 +293,34 @@ func newConfiguration() (*configuration, error) {
 	return &c, nil
 }
 
-// kv represents a key and a value in the map
-type kv struct {
+// startLockTimeoutReleaser will wait for lock timeout messages
+// from the files that are currently active being handled, if
+// a message is received we will set the locked state for that
+// file to false, so the file will be scheduled for a retry at
+// a later time.
+func (s *server) startLockTimeoutReleaser(ctx context.Context) {
+	for {
+		select {
+		case kv := <-s.allFilesState.lockTimeoutCh:
+			kv.v.fileState.locked = false
+			s.allFilesState.update(kv)
+
+		case <-ctx.Done():
+			log.Printf("info: exiting startLockTimeoutReleaser\n")
+			return
+		}
+	}
+}
+
+// kv represents a key value pair in the map
+type keyValue struct {
 	k string
 	v fileInfo
 }
 
-func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
+// startLogsWatcher will start the watcher for checking for new files
+// in the specified logs directory.
+func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher) error {
 
 	// Start listening for events.
 	go func() {
@@ -274,11 +330,10 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 				if !ok {
 					return
 				}
-				// log.Println("event:", event)
 
 				if event.Op == notifyOp {
 
-					fileInfo, err := newFileInfo(event.Name)
+					fileInfo, err := newFileInfo(ctx, event.Name)
 					if err != nil && err != errIsDir {
 						// log.Printf("error: failed to newFileInfo for path: %v\n", err)
 						continue
@@ -290,11 +345,11 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 
 					// Add or update the information for the file in the map.
 
-					if exists := s.fileState.exists(kv{k: event.Name}); !exists {
+					if exists := s.allFilesState.exists(keyValue{k: event.Name}); !exists {
 						log.Println("info: found new file:", event.Name)
 					}
 
-					s.fileState.update(kv{k: event.Name, v: fileInfo})
+					s.allFilesState.update(keyValue{k: event.Name, v: fileInfo})
 
 					// log.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
 
@@ -322,7 +377,7 @@ func (s *server) startLogsWatcher(watcher *fsnotify.Watcher) error {
 // When a reply is received we know that the copy was ok, and the belonging
 // reply files and source files defined in the reply are deleted. The entry
 // for the specific file are also removed from the map.
-func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
+func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watcher) error {
 
 	// Start listening for events.
 	go func() {
@@ -337,7 +392,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 				// Use Chmod for mac
 
 				if event.Op == notifyOp {
-					fileInfoReplyFile, err := newFileInfo(event.Name)
+					fileInfoReplyFile, err := newFileInfo(ctx, event.Name)
 					if err != nil {
 						// log.Printf("error: failed to newFileInfo for path: %v\n", err)
 						continue
@@ -373,7 +428,11 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 						log.Printf("error: failed to remove actual file: %v\n", err)
 					}
 
-					s.fileState.delete(kv{k: copiedFileRealPath})
+					// Done with with file.
+					// stop the timeout timer go routine for the specific file.
+					s.allFilesState.cancelTimer(keyValue{k: copiedFileRealPath})
+					// delete the entry for the file int the map.
+					s.allFilesState.delete(keyValue{k: copiedFileRealPath})
 
 					// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
 
@@ -401,7 +460,7 @@ func (s *server) startRepliesWatcher(watcher *fsnotify.Watcher) error {
 
 // sendFile is a wrapper function for the functions that
 // will read File, send File and deletes the file.
-func (s *server) sendFile(file fileInfo) error {
+func (s *server) sendMessage(file fileInfo) error {
 
 	// Append the actual filename to the directory specified in the msg template for
 	// both source and destination.
@@ -452,7 +511,7 @@ func (s *server) sendFile(file fileInfo) error {
 }
 
 // getInitialFiles will look up all the files in the given folder,
-func (s *server) getInitialFiles() error {
+func (s *server) getInitialFiles(ctx context.Context) error {
 
 	err := filepath.Walk(s.configuration.copySrcFolder,
 		func(path string, info os.FileInfo, err error) error {
@@ -461,7 +520,7 @@ func (s *server) getInitialFiles() error {
 			}
 			fmt.Println(path, info.Size())
 
-			f, err := newFileInfo(path)
+			f, err := newFileInfo(ctx, path)
 			if err != nil && err == errIsDir {
 				return nil
 			}
@@ -469,7 +528,7 @@ func (s *server) getInitialFiles() error {
 				return err
 			}
 
-			s.fileState.update(kv{k: path, v: f})
+			s.allFilesState.update(keyValue{k: path, v: f})
 
 			return nil
 		})
@@ -534,7 +593,7 @@ func main() {
 	}
 	defer logWatcher.Close()
 
-	err = s.startLogsWatcher(logWatcher)
+	err = s.startLogsWatcher(ctx, logWatcher)
 	if err != nil {
 		log.Printf("%v\n", err)
 		os.Exit(1)
@@ -546,19 +605,19 @@ func main() {
 	}
 	defer repliesWatcher.Close()
 
-	err = s.startRepliesWatcher(repliesWatcher)
+	err = s.startRepliesWatcher(ctx, repliesWatcher)
 	if err != nil {
 		log.Printf("%v\n", err)
 		os.Exit(1)
 	}
 
-	err = s.getInitialFiles()
+	err = s.getInitialFiles(ctx)
 	if err != nil {
 		log.Printf("%v\n", err)
 		os.Exit(1)
 	}
 
-	processFileCh := make(chan kv)
+	processFileCh := make(chan keyValue)
 	maxCopyProcessesCh := make(chan struct{}, s.configuration.maxCopyProcesses)
 
 	// Check file status at given interval, and start processing if file is old enough.
@@ -568,15 +627,13 @@ func main() {
 		defer ticker.Stop()
 
 		for {
-
 			select {
 			// Loop over the map, and pick the first item that is not in statusLocked
 			case <-ticker.C:
-				// fmt.Println(" * START OF LOOP!")
 
 				// for k, v := range s.fileState.m {
 				for {
-					kv, ok := s.fileState.nextUnlocked()
+					kv, ok := s.allFilesState.nextUnlocked()
 					if !ok {
 						fmt.Println("found no new unlocked items in the map")
 						break
@@ -584,10 +641,10 @@ func main() {
 
 					maxCopyProcessesCh <- struct{}{}
 
-					fmt.Printf(" * Got nextUnlocked: %+v\n", kv)
+					fmt.Printf(" * Got nextUnlocked file to be processed: %+v\n", kv.k)
 					// Update the map element for the file with statusLocked.
-					kv.v.fileStatus = statusLocked
-					s.fileState.update(kv)
+					kv.v.fileState.locked = true
+					s.allFilesState.update(kv)
 
 					// Start up a go routine who will belong to the individual file,
 					// and also be responsible for checking if the file is older than
@@ -602,21 +659,18 @@ func main() {
 							age := timeNow - kv.v.modTime
 
 							if age > s.configuration.maxFileAge {
-								log.Printf("info: file with age %v is older than maxAge, sending file to socket: %v\n", age, kv.v.fileRealPath)
+								log.Printf("info: file with age %v seconds is older than maxAge %v seconds, sending file to socket: %v\n", age, s.configuration.maxFileAge, kv.v.fileRealPath)
 
 								processFileCh <- kv
 								<-maxCopyProcessesCh
 
 								return
 
-								// fmt.Println(" * DEBUG 2")
 							}
 						}
 					}()
 
 				}
-
-				// fmt.Println(" * DONE WITH LOOP!")
 
 			case <-ctx.Done():
 				return
@@ -631,17 +685,54 @@ func main() {
 		for {
 			select {
 			case kv := <-processFileCh:
-				err = s.sendFile(kv.v)
+				err = s.sendMessage(kv.v)
 				if err != nil {
 					log.Printf("%v\n", err)
 					os.Exit(1)
 				}
+
+				// When the message is sent we want to create a function with a
+				// timer on each file being processed, so if it takes to long
+				// we can release the lock again, so the file will be retried
+				// later.
+				//
+				// TODO: We should also have a context to be able to cancel the
+				// function if the file is processed succesfully, so we also
+				// need to put the cancel function inside the map value so we
+				// can find the correct one and use it.
+
+				go func(kv keyValue) {
+					t, err := strconv.Atoi(s.configuration.copyMaxTransferTime)
+					if err != nil {
+						log.Printf("error: failed to convert copyMaxTransferTime to int: %v\n", err)
+						os.Exit(1)
+					}
+
+					ticker := time.NewTicker(time.Second * time.Duration(t*s.configuration.msgRetries))
+
+					select {
+					case <-ticker.C:
+						s.allFilesState.lockTimeoutCh <- kv
+						log.Printf("info: got lockTimeout, unlocking file to be reprocessed: %v\n", kv.k)
+
+					// When a file is successfully copied, we should receive
+					// a done signal here so we can return from this the go routine.
+					case <-kv.v.fileState.ctx.Done():
+						log.Printf("info: got <-ctx.Done on file: %v\n", kv.k)
+						return
+					}
+				}(kv)
+
 			case <-ctx.Done():
 				return
 			}
 
 		}
 
+	}()
+
+	go func() {
+		s.startLockTimeoutReleaser(ctx)
 	}()
 
 	<-sigCh
