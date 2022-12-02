@@ -234,7 +234,7 @@ func newConfiguration() (*configuration, error) {
 	flag.StringVar(&c.msgToNode, "msgToNode", "", "the name of the (this) local steward instance where we inject messages on the socket")
 	// ---
 	flag.IntVar(&c.msgACKTimeout, "msgACKTimeout", 5, "how long shall we wait for a steward message timeout in seconds")
-	flag.IntVar(&c.msgRetries, "msgRetries", 5, "the number of retries we want to try sending a message before we give up")
+	flag.IntVar(&c.msgRetries, "msgRetries", 1, "the number of retries we want to try sending a message before we give up")
 
 	flag.StringVar(&c.copySrcFolder, "copySrcFolder", "", "the folder to watch")
 	flag.StringVar(&c.copyDstToNode, "copyDstToNode", "", "the node to send the messages created to")
@@ -344,9 +344,17 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 					}
 
 					// Add or update the information for the file in the map.
+					exists := s.allFilesState.exists(keyValue{k: event.Name})
 
-					if exists := s.allFilesState.exists(keyValue{k: event.Name}); !exists {
+					if !exists {
 						log.Println("info: found new file:", event.Name)
+					}
+
+					// Testing with canceling the timer so we stop the go routine before
+					// we do an update.
+					if exists {
+						s.allFilesState.cancelTimer(keyValue{k: fileInfo.fileRealPath})
+						log.Printf("updating file info in map: canceled timer for file: %v\n", fileInfo.fileRealPath)
 					}
 
 					s.allFilesState.update(keyValue{k: event.Name, v: fileInfo})
@@ -419,7 +427,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 						fname := filepath.Join(fileInfoReplyFile.fileDir, fileInfoReplyFile.actualFileNameToCopy)
 						err = os.Remove(fname)
 						if err != nil {
-							log.Printf("error: failed to remove reply folder file: %v\n", err)
+							log.Printf("error: failed to remove actual file: %v\n", err)
 						}
 					}
 
@@ -431,6 +439,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 					// Done with with file.
 					// stop the timeout timer go routine for the specific file.
 					s.allFilesState.cancelTimer(keyValue{k: copiedFileRealPath})
+					log.Printf("got reply: canceled timer for file: %v\n", copiedFileRealPath)
 					// delete the entry for the file int the map.
 					s.allFilesState.delete(keyValue{k: copiedFileRealPath})
 

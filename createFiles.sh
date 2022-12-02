@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for ((i = 1; i <= 10; ++i)); do
-    touch ./logs/"$i".txt
+for ((i = 1; i <= 100; ++i)); do
+    dd if=/dev/urandom of=./logs/"$i".txt bs=64K count=1
     echo "this file contains: $i" >./logs/"$i".txt
 done
