@@ -396,6 +396,24 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 // for the specific file are also removed from the map.
 func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watcher) error {
 
+	// Remove any old content in the replies folder upon start.
+	err := filepath.Walk(s.configuration.msgRepliesFolder,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if !os.FileInfo.IsDir(info) {
+				os.Remove(path)
+				fmt.Printf("info: deleted files from replies folder upon start: %v\n", path)
+			}
+
+			return nil
+		})
+	if err != nil {
+		return err
+	}
+
 	// Start listening for events.
 	go func() {
 		for {
@@ -468,7 +486,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 	}()
 
 	// Add a path.
-	err := watcher.Add(s.configuration.msgRepliesFolder)
+	err = watcher.Add(s.configuration.msgRepliesFolder)
 	if err != nil {
 		log.Fatal(err)
 	}
