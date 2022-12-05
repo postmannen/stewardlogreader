@@ -302,9 +302,13 @@ func (s *server) startLockTimeoutReleaser(ctx context.Context) {
 	for {
 		select {
 		case kv := <-s.allFilesState.lockTimeoutCh:
+			// When a value is received on the channel here it means that the
+			// ticker in the go routine who handles the timeout was reached,
+			// and then the fileState goroutine have ended, so it is not need
+			// to call cancel that go routine here. We just set the value for
+			// the specific file to false so it will be retried later.
+
 			kv.v.fileState.locked = false
-			// NB!: Testing here with the cancel, or if the context is already canceled....
-			// kv.v.fileState.cancel()
 			s.allFilesState.update(kv)
 			log.Printf("info: received value on lockTimeoutCh, setting locked=false, and giving Cancel() to go routines for file: %v\n", kv.k)
 
