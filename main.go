@@ -303,7 +303,10 @@ func (s *server) startLockTimeoutReleaser(ctx context.Context) {
 		select {
 		case kv := <-s.allFilesState.lockTimeoutCh:
 			kv.v.fileState.locked = false
+			// NB!: Testing here with the cancel, or if the context is already canceled....
+			// kv.v.fileState.cancel()
 			s.allFilesState.update(kv)
+			log.Printf("info: received value on lockTimeoutCh, setting locked=false, and giving Cancel() to go routines for file: %v\n", kv.k)
 
 		case <-ctx.Done():
 			log.Printf("info: exiting startLockTimeoutReleaser\n")
@@ -350,11 +353,13 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 						log.Println("info: found new file:", event.Name)
 					}
 
-					// Testing with canceling the timer so we stop the go routine before
-					// we do an update.
+					// Testing with canceling the timer. Since we've got notified of an update
+					// that a file have been written to, we stop the go timer routine if one exist
+					// before we do an update, and a new timer for that will file will be created
+					// later.
 					if exists {
 						s.allFilesState.cancelTimer(keyValue{k: fileInfo.fileRealPath})
-						log.Printf("updating file info in map: canceled timer for file: %v\n", fileInfo.fileRealPath)
+						log.Printf("info: logWatcher: updating file info in map, canceled timer for file: %v\n", fileInfo.fileRealPath)
 					}
 
 					s.allFilesState.update(keyValue{k: event.Name, v: fileInfo})
@@ -650,7 +655,7 @@ func main() {
 
 					maxCopyProcessesCh <- struct{}{}
 
-					fmt.Printf(" * Got nextUnlocked file to be processed: %+v\n", kv.k)
+					log.Printf("info: got nextUnlocked file to be processed: %+v\n", kv.k)
 					// Update the map element for the file with statusLocked.
 					kv.v.fileState.locked = true
 					s.allFilesState.update(kv)
@@ -660,22 +665,34 @@ func main() {
 					// max age. When the file is older than max age we send it to the
 					// socket.
 					go func() {
+						log.Printf("info: start up check interval timer for file: %+v\n", kv.k)
+
 						ticker2 := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
 						defer ticker2.Stop()
 
-						for range ticker2.C {
-							timeNow := time.Now().Unix()
-							age := timeNow - kv.v.modTime
+						for {
+							select {
+							case <-ticker2.C:
+								timeNow := time.Now().Unix()
+								age := timeNow - kv.v.modTime
 
-							if age > s.configuration.maxFileAge {
-								log.Printf("info: file with age %v seconds is older than maxAge %v seconds, sending file to socket: %v\n", age, s.configuration.maxFileAge, kv.v.fileRealPath)
+								if age > s.configuration.maxFileAge {
+									log.Printf("info: file with age %v seconds is older than maxAge %v seconds, preparing to send file to socket: %v\n", age, s.configuration.maxFileAge, kv.v.fileRealPath)
 
-								processFileCh <- kv
-								<-maxCopyProcessesCh
+									processFileCh <- kv
+									<-maxCopyProcessesCh
 
+									return
+
+								}
+
+								log.Printf("info: file not old enough, age %v seconds, maxAge set %v seconds, looping: %v\n", age, s.configuration.maxFileAge, kv.v.fileRealPath)
+
+							case <-kv.v.fileState.ctx.Done():
+								log.Printf("info: got <-ctx.Done checking for file age for file: %+v\n", kv.k)
 								return
-
 							}
+
 						}
 					}()
 
@@ -688,9 +705,9 @@ func main() {
 		}
 	}()
 
+	// Read one value at a time from the channel, where each value represents
+	// a file that are old enough to send a message to Steward to copy it.
 	go func() {
-
-		// Receive one file at a time.
 		for {
 			select {
 			case kv := <-processFileCh:
@@ -722,7 +739,7 @@ func main() {
 					select {
 					case <-ticker.C:
 						s.allFilesState.lockTimeoutCh <- kv
-						log.Printf("info: got lockTimeout, unlocking file to be reprocessed: %v\n", kv.k)
+						log.Printf("info: sendt message and got lockTimeout, so we never got a reply message within the time, unlocking file to be reprocessed: %v\n", kv.k)
 
 					// When a file is successfully copied, we should receive
 					// a done signal here so we can return from this the go routine.
