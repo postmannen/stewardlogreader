@@ -423,8 +423,16 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 					return
 				}
 
-				// Use Create for Linux
-				// Use Chmod for mac
+				// The event types for the operating systems are different, we use :
+				// - Create for Linux
+				// - Chmod for mac
+
+				// for copyReply files we want to delete the files if there is not a
+				// corresponding real file entry in the map. The reason for this is
+				// that this service might have been restarted and we receive messages
+				// created by steward happened earlier but does no longer have a
+				// registered state in the map, so we should just delete those, and let
+				// the logreader redo them.
 
 				if event.Op == notifyOp {
 					fileInfoReplyFile, err := newFileInfo(ctx, event.Name)
