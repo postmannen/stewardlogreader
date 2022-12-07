@@ -339,6 +339,7 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 				}
 
 				if event.Op == notifyOp {
+					fmt.Printf("___DEBUG: fsnotify log folder event: %v, type: %v\n", event.Name, event.Op.String())
 
 					fileInfo, err := newFileInfo(ctx, event.Name)
 					if err != nil && err != errIsDir {
@@ -435,6 +436,8 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 				// the logreader redo them.
 
 				if event.Op == notifyOp {
+					fmt.Printf("___DEBUG: fsnotify reply folder event: %v, type: %v\n", event.Name, event.Op)
+
 					fileInfoReplyFile, err := newFileInfo(ctx, event.Name)
 					if err != nil {
 						log.Printf("error: failed to newFileInfo for path: %v\n", err)
