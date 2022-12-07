@@ -195,6 +195,8 @@ func newFileInfo(ctx context.Context, realPath string) (fileInfo, error) {
 		actualFileNameToCopy = strings.TrimSuffix(fileName, copyReply)
 	case isCopyError:
 		actualFileNameToCopy = strings.TrimSuffix(fileName, copyError)
+	default:
+		actualFileNameToCopy = fileName
 	}
 
 	fi := fileInfo{
@@ -458,20 +460,20 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 					// Get the realpath of the file in the logs folder
 					copiedFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.actualFileNameToCopy)
 
-					if !fileInfoReplyFile.isCopyReply {
+					// Not a sub reply, and not found in map.
+					if !fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
 						// The reply file for the initial message do not use the .copyreply
 						// suffix, and we don't want to delete those yet. We can verify if it
 						// is such a reply by checking if we find a corresponding entry in the
 						// map.
-						if !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
-							log.Printf("info: file was not a copyreply file\n")
 
-							err := os.Remove(fileInfoReplyFile.fileRealPath)
-							if err != nil {
-								log.Printf("error: failed to remove the 'not reply file in replies folder': %v\n", err)
-							}
-							log.Printf("info: deleted 'not reply file in replies folder': %v\n", fileInfoReplyFile.fileRealPath)
+						log.Printf("info: file was not a copyreply file, and not found in map\n")
+
+						err := os.Remove(fileInfoReplyFile.fileRealPath)
+						if err != nil {
+							log.Printf("error: failed to remove the 'not reply file in replies folder': %v\n", err)
 						}
+						log.Printf("info: deleted 'not reply file in replies folder': %v\n", fileInfoReplyFile.fileRealPath)
 
 						continue
 					}
@@ -479,6 +481,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 					// We also check if the file is a copyreply but no registered entry in the map,
 					// and delete the file if no entry found.
 					if fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
+						log.Printf("info: file was a sub copyreply file, and not found in map\n")
 
 						err := os.Remove(fileInfoReplyFile.fileRealPath)
 						if err != nil {
@@ -494,8 +497,6 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 						log.Printf("info: was other kind of not-copyreply file: %v\n", fileInfoReplyFile.fileRealPath)
 						continue
 					}
-
-					// Prepare the file path for eventual reply messages so we can check for them later.
 
 					log.Printf("info: got copyreply message, copy went ok for: %v\n", fileInfoReplyFile.actualFileNameToCopy)
 
