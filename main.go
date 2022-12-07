@@ -131,6 +131,17 @@ func (f *allFilesState) cancelTimer(kv keyValue) {
 
 }
 
+// cancelTimer will cancel the timer go routine belonging to a file
+// that is used for checking for stale copy processes.
+func (f *allFilesState) printAll() {
+	f.mu.Lock()
+	for k, v := range f.m {
+		log.Printf("current map content, k: %+v, v: %+v\n", k, v)
+	}
+	f.mu.Unlock()
+
+}
+
 func newAllFilesState() *allFilesState {
 	f := allFilesState{
 		m:             make(map[string]fileInfo),
@@ -465,12 +476,6 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 						continue
 					}
 
-					// Catch eventual other not-copyreply files
-					if !fileInfoReplyFile.isCopyReply {
-						log.Printf("info: was other kind of not-copyreply file: %v\n", fileInfoReplyFile.fileRealPath)
-						continue
-					}
-
 					// We also check if the file is a copyreply but no registered entry in the map,
 					// and delete the file if no entry found.
 					if fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
@@ -481,6 +486,12 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 						}
 						log.Printf("info: deleted 'copyreply file without map entry' in replies folder: %v\n", fileInfoReplyFile.fileRealPath)
 
+						continue
+					}
+
+					// Catch eventual other not-copyreply files
+					if !fileInfoReplyFile.isCopyReply {
+						log.Printf("info: was other kind of not-copyreply file: %v\n", fileInfoReplyFile.fileRealPath)
 						continue
 					}
 
