@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,8 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pkg/profile"
 	"gopkg.in/fsnotify.v1"
 	"gopkg.in/yaml.v3"
+
+	_ "net/http/pprof"
 )
 
 var errIsDir = errors.New("is directory")
@@ -126,6 +130,7 @@ func (f *allFilesState) delete(kv keyValue) {
 // that is used for checking for stale copy processes.
 func (f *allFilesState) cancelTimer(kv keyValue) {
 	f.mu.Lock()
+	fmt.Printf(" ** ** Canceling timer for file: %v\n", kv.k)
 	f.m[kv.k].fileState.cancel()
 	f.mu.Unlock()
 
@@ -352,7 +357,7 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 				}
 
 				if event.Op == notifyOp {
-					fmt.Printf("___DEBUG: fsnotify log folder event: %v, type: %v\n", event.Name, event.Op.String())
+					// fmt.Printf("___DEBUG: fsnotify log folder event: %v, type: %v\n", event.Name, event.Op.String())
 
 					fileInfo, err := newFileInfo(ctx, event.Name)
 					if err != nil && err != errIsDir {
@@ -448,93 +453,95 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 				// registered state in the map, so we should just delete those, and let
 				// the logreader redo them.
 
-				if event.Op == notifyOp {
-					fmt.Printf("___DEBUG: fsnotify reply folder event: %v, type: %v\n", event.Name, event.Op)
+				go func() {
+					if event.Op == notifyOp {
+						// fmt.Printf("___DEBUG: fsnotify reply folder event: %v, type: %v\n", event.Name, event.Op)
 
-					fileInfoReplyFile, err := newFileInfo(ctx, event.Name)
-					if err != nil {
-						log.Printf("error: failed to newFileInfo for path: %v\n", err)
-						continue
-					}
-
-					// Get the realpath of the file in the logs folder
-					copiedFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.actualFileNameToCopy)
-
-					// Not a sub reply, and not found in map.
-					if !fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
-						// The reply file for the initial message do not use the .copyreply
-						// suffix, and we don't want to delete those yet. We can verify if it
-						// is such a reply by checking if we find a corresponding entry in the
-						// map.
-
-						log.Printf("info: file was not a copyreply file, and not found in map\n")
-
-						err := os.Remove(fileInfoReplyFile.fileRealPath)
+						fileInfoReplyFile, err := newFileInfo(ctx, event.Name)
 						if err != nil {
-							log.Printf("error: failed to remove the 'not reply file in replies folder': %v\n", err)
-						}
-						log.Printf("info: deleted 'not reply file in replies folder': %v\n", fileInfoReplyFile.fileRealPath)
-
-						continue
-					}
-
-					// We also check if the file is a copyreply but no registered entry in the map,
-					// and delete the file if no entry found.
-					if fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
-						log.Printf("info: file was a sub copyreply file, and not found in map\n")
-
-						err := os.Remove(fileInfoReplyFile.fileRealPath)
-						if err != nil {
-							log.Printf("error: failed to remove the 'copyreply file without a map entry' in replies folder: %v\n", err)
-						}
-						log.Printf("info: deleted 'copyreply file without map entry' in replies folder: %v\n", fileInfoReplyFile.fileRealPath)
-
-						continue
-					}
-
-					// Catch eventual other not-copyreply files
-					if !fileInfoReplyFile.isCopyReply {
-						log.Printf("info: was other kind of not-copyreply file: %v\n", fileInfoReplyFile.fileRealPath)
-						continue
-					}
-
-					log.Printf("info: got copyreply message, copy went ok for: %v\n", fileInfoReplyFile.actualFileNameToCopy)
-
-					if s.configuration.deleteReplies {
-						err := os.Remove(fileInfoReplyFile.fileRealPath)
-						if err != nil {
-							log.Printf("error: failed to remove reply folder file: %v\n", err)
+							log.Printf("error: failed to newFileInfo for path: %v\n", err)
+							return
 						}
 
-						fname := filepath.Join(fileInfoReplyFile.fileDir, fileInfoReplyFile.actualFileNameToCopy)
+						// Get the realpath of the file in the logs folder
+						copiedFileRealPath := filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.actualFileNameToCopy)
 
-						_ = os.Remove(fname)
-						// if err != nil {
-						// // TODO: NB: The initial reply message seems to be deleted by here,
-						// // optimally we should make so those file aren't deleted, so they
-						// // can be deleted only here.
-						// // Commenting out the error message for now.
-						// log.Printf("error1: failed to remove actual file: %v\n", err)
-						// }
+						// Not a sub reply, and not found in map.
+						if !fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
+							// The reply file for the initial message do not use the .copyreply
+							// suffix, and we don't want to delete those yet. We can verify if it
+							// is such a reply by checking if we find a corresponding entry in the
+							// map.
+
+							log.Printf("info: file was not a copyreply file, and not found in map\n")
+
+							err := os.Remove(fileInfoReplyFile.fileRealPath)
+							if err != nil {
+								log.Printf("error: failed to remove the 'not reply file in replies folder': %v\n", err)
+							}
+							log.Printf("info: deleted 'not reply file in replies folder': %v\n", fileInfoReplyFile.fileRealPath)
+
+							return
+						}
+
+						// We also check if the file is a copyreply but no registered entry in the map,
+						// and delete the file if no entry found.
+						if fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
+							log.Printf("info: file was a sub copyreply file, and not found in map\n")
+
+							err := os.Remove(fileInfoReplyFile.fileRealPath)
+							if err != nil {
+								log.Printf("error: failed to remove the 'copyreply file without a map entry' in replies folder: %v\n", err)
+							}
+							log.Printf("info: deleted 'copyreply file without map entry' in replies folder: %v\n", fileInfoReplyFile.fileRealPath)
+
+							return
+						}
+
+						// Catch eventual other not-copyreply files
+						if !fileInfoReplyFile.isCopyReply {
+							log.Printf("info: was other kind of not-copyreply file: %v\n", fileInfoReplyFile.fileRealPath)
+							return
+						}
+
+						log.Printf("info: got copyreply message, copy went ok for: %v\n", fileInfoReplyFile.actualFileNameToCopy)
+
+						if s.configuration.deleteReplies {
+							err := os.Remove(fileInfoReplyFile.fileRealPath)
+							if err != nil {
+								log.Printf("error: failed to remove reply folder file: %v\n", err)
+							}
+
+							fname := filepath.Join(fileInfoReplyFile.fileDir, fileInfoReplyFile.actualFileNameToCopy)
+
+							_ = os.Remove(fname)
+							// if err != nil {
+							// // TODO: NB: The initial reply message seems to be deleted by here,
+							// // optimally we should make so those file aren't deleted, so they
+							// // can be deleted only here.
+							// // Commenting out the error message for now.
+							// log.Printf("error1: failed to remove actual file: %v\n", err)
+							// }
+						}
+
+						err = os.Remove(copiedFileRealPath)
+						if err != nil {
+							log.Printf("error2: failed to remove actual file: %v\n", err)
+						}
+
+						// Done with with file.
+						// stop the timeout timer go routine for the specific file.
+						s.allFilesState.cancelTimer(keyValue{k: copiedFileRealPath})
+						log.Printf("got reply: canceled timer for file: %v\n", copiedFileRealPath)
+						// delete the entry for the file int the map.
+						s.allFilesState.delete(keyValue{k: copiedFileRealPath})
+
+						// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
+
+						//}
+
 					}
-
-					err = os.Remove(copiedFileRealPath)
-					if err != nil {
-						log.Printf("error2: failed to remove actual file: %v\n", err)
-					}
-
-					// Done with with file.
-					// stop the timeout timer go routine for the specific file.
-					s.allFilesState.cancelTimer(keyValue{k: copiedFileRealPath})
-					log.Printf("got reply: canceled timer for file: %v\n", copiedFileRealPath)
-					// delete the entry for the file int the map.
-					s.allFilesState.delete(keyValue{k: copiedFileRealPath})
-
-					// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
-
-					//}
-
-				}
+				}()
 
 			case err, ok := <-watcher.Errors:
 				if !ok {
@@ -669,6 +676,12 @@ func messageToSocket(socketFullPath string, msg []Message) error {
 }
 
 func main() {
+	defer profile.Start(profile.MemProfile, profile.MemProfileRate(1)).Stop()
+
+	go func() {
+		http.ListenAndServe(":9100", nil)
+	}()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -735,18 +748,22 @@ func main() {
 						break
 					}
 
-					maxCopyProcessesCh <- struct{}{}
+					fmt.Printf(" *** blocked, waiting to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(maxCopyProcessesCh), kv.k)
+					// maxCopyProcessesCh <- struct{}{}
+					fmt.Printf(" *** *** putting value to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(maxCopyProcessesCh), kv.k)
 
 					log.Printf("info: got nextUnlocked file to be processed: %+v\n", kv.k)
 					// Update the map element for the file with statusLocked.
+					fmt.Printf(" --- before setting value to locked, file: %v\n", kv.k)
 					kv.v.fileState.locked = true
 					s.allFilesState.update(kv)
+					fmt.Printf(" --- --- after setting value to locked, file: %v\n", kv.k)
 
 					// Start up a go routine who will belong to the individual file,
 					// and also be responsible for checking if the file is older than
 					// max age. When the file is older than max age we send it to the
 					// socket.
-					go func() {
+					go func(kv keyValue) {
 						log.Printf("info: start up check interval timer for file: %+v\n", kv.k)
 
 						ticker2 := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
@@ -761,8 +778,22 @@ func main() {
 								if age > s.configuration.maxFileAge {
 									log.Printf("info: file with age %v seconds is older than maxAge %v seconds, preparing to send file to socket: %v\n", age, s.configuration.maxFileAge, kv.v.fileRealPath)
 
-									processFileCh <- kv
-									<-maxCopyProcessesCh
+									fmt.Printf("DEBUG1: %v\n", kv.k)
+									select {
+									case processFileCh <- kv:
+										fmt.Printf(" * DEBUG: got file to process: %v\n", kv.k)
+									case <-kv.v.fileState.ctx.Done():
+										// If ctx.Done just continue to release a value on
+										// maxCopyProcesses.
+										fmt.Printf(" * DEBUG: got ctx.Done when waiting for files to process: %v\n", kv.k)
+									}
+
+									fmt.Printf("DEBUG2: %v\n", kv.k)
+
+									//<-maxCopyProcessesCh
+									fmt.Printf(" *** *** *** released value to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(maxCopyProcessesCh), kv.k)
+
+									fmt.Printf("DEBUG3: %v\n", kv.k)
 
 									return
 
@@ -776,7 +807,7 @@ func main() {
 							}
 
 						}
-					}()
+					}(kv)
 
 				}
 
@@ -793,6 +824,7 @@ func main() {
 		for {
 			select {
 			case kv := <-processFileCh:
+				fmt.Printf(" *** DEBUG: <-processFileCh : %+v\n", kv)
 				err = s.sendMessage(kv.v)
 				if err != nil {
 					log.Printf("%v\n", err)
