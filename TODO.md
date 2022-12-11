@@ -7,3 +7,8 @@
 - If the copy have failed for some reason we are left with initial reply file, but it seems like the copy process of that same file is never started again.
 
 ## Other
+
+1.1 is branch with copy new values to map.
+1.1.1 is same as 1.1 but testing with pointers for map values, but not merged into 1.1
+
+1.1.2 is same as 1.1, but further testing with still copy values with map

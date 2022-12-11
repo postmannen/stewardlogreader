@@ -28,8 +28,9 @@ var errIsDir = errors.New("is directory")
 
 // server holds the main structures used for the logreader.
 type server struct {
-	allFilesState *allFilesState
-	configuration *configuration
+	allFilesState      *allFilesState
+	configuration      *configuration
+	maxCopyProcessesCh chan struct{}
 }
 
 // newServer will prepare and return a *server.
@@ -40,8 +41,9 @@ func newServer() (*server, error) {
 	}
 
 	s := server{
-		allFilesState: newAllFilesState(),
-		configuration: configuration,
+		allFilesState:      newAllFilesState(),
+		configuration:      configuration,
+		maxCopyProcessesCh: make(chan struct{}, configuration.maxCopyProcesses),
 	}
 
 	return &s, nil
@@ -385,6 +387,15 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 						log.Printf("info: logWatcher: updating file info in map, canceled timer for file: %v\n", fileInfo.fileRealPath)
 					}
 
+					// Free up a worker slot if the file already is put to locked
+					s.allFilesState.mu.Lock()
+					if _, ok := s.allFilesState.m[event.Name]; ok {
+						if s.allFilesState.m[event.Name].fileState.locked {
+							<-s.maxCopyProcessesCh
+						}
+					}
+					s.allFilesState.mu.Unlock()
+
 					s.allFilesState.update(keyValue{k: event.Name, v: fileInfo})
 
 					// log.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
@@ -537,6 +548,8 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 						s.allFilesState.delete(keyValue{k: copiedFileRealPath})
 
 						// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
+
+						<-s.maxCopyProcessesCh
 
 						//}
 
@@ -727,7 +740,6 @@ func main() {
 	}
 
 	processFileCh := make(chan keyValue)
-	maxCopyProcessesCh := make(chan struct{}, s.configuration.maxCopyProcesses)
 
 	// Check file status at given interval, and start processing if file is old enough.
 	go func() {
@@ -748,9 +760,9 @@ func main() {
 						break
 					}
 
-					fmt.Printf(" *** blocked, waiting to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(maxCopyProcessesCh), kv.k)
-					// maxCopyProcessesCh <- struct{}{}
-					fmt.Printf(" *** *** putting value to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(maxCopyProcessesCh), kv.k)
+					fmt.Printf(" *** blocked, waiting to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(s.maxCopyProcessesCh), kv.k)
+					s.maxCopyProcessesCh <- struct{}{}
+					fmt.Printf(" *** *** putting value to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(s.maxCopyProcessesCh), kv.k)
 
 					log.Printf("info: got nextUnlocked file to be processed: %+v\n", kv.k)
 					// Update the map element for the file with statusLocked.
@@ -787,13 +799,6 @@ func main() {
 										// maxCopyProcesses.
 										fmt.Printf(" * DEBUG: got ctx.Done when waiting for files to process: %v\n", kv.k)
 									}
-
-									fmt.Printf("DEBUG2: %v\n", kv.k)
-
-									//<-maxCopyProcessesCh
-									fmt.Printf(" *** *** *** released value to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(maxCopyProcessesCh), kv.k)
-
-									fmt.Printf("DEBUG3: %v\n", kv.k)
 
 									return
 
