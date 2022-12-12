@@ -546,10 +546,22 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 
 						// Done with with file.
 						// stop the timeout timer go routine for the specific file.
-						s.allFilesState.cancelTimer(keyValue{k: copiedFileRealPath})
+						//s.allFilesState.cancelTimer(keyValue{k: copiedFileRealPath})
 						log.Printf("got reply: canceled timer for file: %v\n", copiedFileRealPath)
 						// delete the entry for the file int the map.
-						s.allFilesState.delete(keyValue{k: copiedFileRealPath})
+						//s.allFilesState.delete(keyValue{k: copiedFileRealPath})
+
+						{
+							s.allFilesState.mu.Lock()
+							if v, ok := s.allFilesState.m[copiedFileRealPath]; ok {
+								if s.allFilesState.m[copiedFileRealPath].fileState.locked {
+									v.fileState.cancel()
+								}
+							}
+
+							delete(s.allFilesState.m, copiedFileRealPath)
+							s.allFilesState.mu.Unlock()
+						}
 
 						// fmt.Printf("info: fileWatcher: deleted map entry for file: fInfo contains: %#v\n", actualFileRealPath)
 
