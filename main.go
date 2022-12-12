@@ -376,6 +376,8 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 
 					if !exists {
 						log.Println("info: found new file:", event.Name)
+
+						s.allFilesState.update(keyValue{k: event.Name, v: fileInfo})
 					}
 
 					// Testing with canceling the timer. Since we've got notified of an update
@@ -383,20 +385,22 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 					// before we do an update, and a new timer for that will file will be created
 					// later.
 					if exists {
-						s.allFilesState.cancelTimer(keyValue{k: fileInfo.fileRealPath})
+						// s.allFilesState.cancelTimer(keyValue{k: fileInfo.fileRealPath})
 						log.Printf("info: logWatcher: updating file info in map, canceled timer for file: %v\n", fileInfo.fileRealPath)
-					}
 
-					// Free up a worker slot if the file already is put to locked
-					s.allFilesState.mu.Lock()
-					if _, ok := s.allFilesState.m[event.Name]; ok {
-						if s.allFilesState.m[event.Name].fileState.locked {
-							<-s.maxCopyProcessesCh
+						// Free up a worker slot if the file already is put to locked
+						s.allFilesState.mu.Lock()
+						if v, ok := s.allFilesState.m[event.Name]; ok {
+							if s.allFilesState.m[event.Name].fileState.locked {
+								v.fileState.cancel()
+								<-s.maxCopyProcessesCh
+							}
 						}
-					}
-					s.allFilesState.mu.Unlock()
 
-					s.allFilesState.update(keyValue{k: event.Name, v: fileInfo})
+						s.allFilesState.m[event.Name] = fileInfo
+
+						s.allFilesState.mu.Unlock()
+					}
 
 					// log.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
 
