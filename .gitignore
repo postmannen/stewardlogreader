@@ -18,3 +18,5 @@ logs/
 logs.orig/
 logs-copied/
 replies/
+stewardlogreader-linux-amd64
+stewardlogreader-linux-amd64.tar.gz
