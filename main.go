@@ -287,7 +287,13 @@ func newConfiguration() (*configuration, error) {
 
 	// Initiate, and set the log level.
 	if c.logLevel == "debug" {
-		opts := slog.HandlerOptions{Level: slog.DebugLevel}
+		opts := slog.HandlerOptions{Level: slog.DebugLevel,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey {
+					return slog.Attr{}
+				}
+				return a
+			}}
 		slog.SetDefault(slog.New(opts.NewTextHandler(os.Stderr)))
 	} else {
 		opts := slog.HandlerOptions{Level: slog.InfoLevel}
