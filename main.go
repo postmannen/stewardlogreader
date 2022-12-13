@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/pkg/profile"
+	"golang.org/x/exp/slog"
 	"gopkg.in/fsnotify.v1"
 	"gopkg.in/yaml.v3"
 
@@ -132,19 +133,8 @@ func (f *allFilesState) delete(kv keyValue) {
 // that is used for checking for stale copy processes.
 func (f *allFilesState) cancelTimer(kv keyValue) {
 	f.mu.Lock()
-	fmt.Printf(" ** ** Canceling timer for file: %v\n", kv.k)
+	slog.Debug("cancelTimer: Canceling timer for file", "path", kv.k)
 	f.m[kv.k].fileState.cancel()
-	f.mu.Unlock()
-
-}
-
-// cancelTimer will cancel the timer go routine belonging to a file
-// that is used for checking for stale copy processes.
-func (f *allFilesState) printAll() {
-	f.mu.Lock()
-	for k, v := range f.m {
-		log.Printf("current map content, k: %+v, v: %+v\n", k, v)
-	}
 	f.mu.Unlock()
 
 }
@@ -185,7 +175,7 @@ func newFileInfo(ctx context.Context, realPath string) (fileInfo, error) {
 
 	inf, err := os.Stat(realPath)
 	if err != nil {
-		return fileInfo{}, fmt.Errorf("error: newFileInfo: os.Stat failed: %v", err)
+		return fileInfo{}, fmt.Errorf("newFileInfo: os.Stat failed: %v", err)
 	}
 
 	if inf.IsDir() {
@@ -214,8 +204,7 @@ func newFileInfo(ctx context.Context, realPath string) (fileInfo, error) {
 		isCopyReply:          isCopyReply,
 		isCopyError:          isCopyError,
 		actualFileNameToCopy: actualFileNameToCopy,
-		//HERE!
-		fileState: newFileState(ctx),
+		fileState:            newFileState(ctx),
 	}
 
 	return fi, nil
@@ -243,6 +232,8 @@ type configuration struct {
 	deleteReplies bool
 
 	maxCopyProcesses int
+
+	logLevel string
 }
 
 // newConfiguration will parse all the input flags, check if values
@@ -271,43 +262,54 @@ func newConfiguration() (*configuration, error) {
 
 	flag.IntVar(&c.maxCopyProcesses, "maxCopyProcesses", 5, "max copy processes to run simultaneously")
 
+	flag.StringVar(&c.logLevel, "logLevel", "info", "Select: info, debug")
+
 	flag.Parse()
 
 	if c.socketFullPath == "" {
-		return &configuration{}, fmt.Errorf("error: you need to specify the full path to the socket")
+		return &configuration{}, fmt.Errorf("newConfiguration: you need to specify the full path to the socket")
 	}
 	if c.msgRepliesFolder == "" {
-		return &configuration{}, fmt.Errorf("error: you need to specify the msgRepliesFolder")
+		return &configuration{}, fmt.Errorf("newConfiguration: you need to specify the msgRepliesFolder")
 	}
 	if c.msgToNode == "" {
-		return &configuration{}, fmt.Errorf("error: you need to specify the msgToNode")
+		return &configuration{}, fmt.Errorf("newConfiguration: you need to specify the msgToNode")
 	}
 
 	if c.copyDstToNode == "" {
-		return &configuration{}, fmt.Errorf("error: you need to specify the copyDstToNode flag")
+		return &configuration{}, fmt.Errorf("newConfiguration: you need to specify the copyDstToNode flag")
 	}
 	if c.copyDstFolder == "" {
-		return &configuration{}, fmt.Errorf("error: you need to specify the copyDstFolder flag")
+		return &configuration{}, fmt.Errorf("newConfiguration: you need to specify the copyDstFolder flag")
 	}
 	if c.copyChunkSize == "" {
-		return &configuration{}, fmt.Errorf("error: you need to specify the copyChunkSize flag")
+		return &configuration{}, fmt.Errorf("newConfiguration: you need to specify the copyChunkSize flag")
 	}
 	if c.copyMaxTransferTime == "" {
-		return &configuration{}, fmt.Errorf("error: you need to specify the copyMaxTransferTime flag")
+		return &configuration{}, fmt.Errorf("newConfiguration: you need to specify the copyMaxTransferTime flag")
 	}
 
 	_, err := os.Stat(c.msgRepliesFolder)
 	if err != nil {
-		fmt.Printf("error: could not find replies folder, creating it\n")
+		slog.Info("newConfiguration: could not find replies folder, creating it\n")
 		os.MkdirAll(c.msgRepliesFolder, 0755)
 		if err != nil {
-			return &configuration{}, fmt.Errorf("error: failed to create replies folder: %v", err)
+			return &configuration{}, fmt.Errorf("newConfiguration: failed to create replies folder: %v", err)
 		}
 	}
 
 	_, err = os.Stat(c.copySrcFolder)
 	if err != nil {
-		return &configuration{}, fmt.Errorf("error: the source folder to watch does not exist: %v", err)
+		return &configuration{}, fmt.Errorf("newConfiguration: the source folder to watch does not exist: %v", err)
+	}
+
+	// Initiate, and set the log level.
+	if c.logLevel == "debug" {
+		opts := slog.HandlerOptions{Level: slog.DebugLevel}
+		slog.SetDefault(slog.New(opts.NewTextHandler(os.Stderr)))
+	} else {
+		opts := slog.HandlerOptions{Level: slog.InfoLevel}
+		slog.SetDefault(slog.New(opts.NewTextHandler(os.Stderr)))
 	}
 
 	return &c, nil
@@ -330,10 +332,10 @@ func (s *server) startLockTimeoutReleaser(ctx context.Context) {
 
 			kv.v.fileState.locked = false
 			s.allFilesState.update(kv)
-			log.Printf("info: received value on lockTimeoutCh, setting locked=false, and giving Cancel() to go routines for file: %v\n", kv.k)
+			slog.Debug("startLockTimeoutReleaser: received value on lockTimeoutCh, setting locked=false, and giving Cancel() to go routines for file", "path", kv.k)
 
 		case <-ctx.Done():
-			log.Printf("info: exiting startLockTimeoutReleaser\n")
+			slog.Debug("startLockTimeoutReleaser: exiting startLockTimeoutReleaser\n")
 			return
 		}
 	}
@@ -375,7 +377,7 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 					exists := s.allFilesState.exists(keyValue{k: event.Name})
 
 					if !exists {
-						log.Println("info: found new file:", event.Name)
+						slog.Debug("startLogsWatcher: found new file:", "path", event.Name)
 
 						s.allFilesState.update(keyValue{k: event.Name, v: fileInfo})
 					}
@@ -386,7 +388,7 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 					// later.
 					if exists {
 						// s.allFilesState.cancelTimer(keyValue{k: fileInfo.fileRealPath})
-						log.Printf("info: logWatcher: updating file info in map, canceled timer for file: %v\n", fileInfo.fileRealPath)
+						slog.Debug("startLogsWatcher: updating file info in map, canceled timer for file", "path", fileInfo.fileRealPath)
 
 						// Free up a worker slot if the file already is put to locked
 						s.allFilesState.mu.Lock()
@@ -402,7 +404,7 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 						s.allFilesState.mu.Unlock()
 					}
 
-					// log.Printf("info: fileWatcher: updated map entry for file: fInfo contains: %v\n", fileInfo)
+					slog.Debug("startLogsWatcher: updated map entry for file", "value", fileInfo)
 
 				}
 
@@ -418,7 +420,7 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 	// Add a path.
 	err := watcher.Add(s.configuration.copySrcFolder)
 	if err != nil {
-		log.Fatal(err)
+		slog.Info("startLogsWatcher: failed to add watcher", "error", err)
 	}
 
 	return nil
@@ -439,7 +441,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 
 			if !os.FileInfo.IsDir(info) {
 				os.Remove(path)
-				fmt.Printf("info: deleted files from replies folder upon start: %v\n", path)
+				slog.Debug("startRepliesWatcher: deleted file from replies folder upon start", "path", path)
 			}
 
 			return nil
@@ -474,7 +476,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 
 						fileInfoReplyFile, err := newFileInfo(ctx, event.Name)
 						if err != nil {
-							log.Printf("error: failed to newFileInfo for path: %v\n", err)
+							slog.Info("startRepliesWatcher: failed to newFileInfo for path", "error", err)
 							return
 						}
 
@@ -488,13 +490,13 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 							// is such a reply by checking if we find a corresponding entry in the
 							// map.
 
-							log.Printf("info: file was not a copyreply file, and not found in map\n")
+							slog.Debug("startRepliesWatcher: file was not a copyreply file, and not found in map")
 
 							err := os.Remove(fileInfoReplyFile.fileRealPath)
 							if err != nil {
-								log.Printf("error: failed to remove the 'not reply file in replies folder': %v\n", err)
+								slog.Info("startRepliesWatcher: failed to remove the 'not reply file in replies folder'", "error", err)
 							}
-							log.Printf("info: deleted 'not reply file in replies folder': %v\n", fileInfoReplyFile.fileRealPath)
+							slog.Debug("startRepliesWatcher: deleted 'not reply file in replies folder'", "path", fileInfoReplyFile.fileRealPath)
 
 							return
 						}
@@ -502,29 +504,29 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 						// We also check if the file is a copyreply but no registered entry in the map,
 						// and delete the file if no entry found.
 						if fileInfoReplyFile.isCopyReply && !s.allFilesState.exists(keyValue{k: copiedFileRealPath}) {
-							log.Printf("info: file was a sub copyreply file, and not found in map\n")
+							slog.Debug("startRepliesWatcher: file was a sub copyreply file, and not found in map")
 
 							err := os.Remove(fileInfoReplyFile.fileRealPath)
 							if err != nil {
-								log.Printf("error: failed to remove the 'copyreply file without a map entry' in replies folder: %v\n", err)
+								slog.Info("startRepliesWatcher: failed to remove the 'copyreply file without a map entry' in replies folder", "error", err)
 							}
-							log.Printf("info: deleted 'copyreply file without map entry' in replies folder: %v\n", fileInfoReplyFile.fileRealPath)
+							slog.Debug("startRepliesWatcher: deleted 'copyreply file without map entry' in replies folder: %v\n", fileInfoReplyFile.fileRealPath)
 
 							return
 						}
 
 						// Catch eventual other not-copyreply files
 						if !fileInfoReplyFile.isCopyReply {
-							log.Printf("info: was other kind of not-copyreply file: %v\n", fileInfoReplyFile.fileRealPath)
+							slog.Debug("startRepliesWatcher: was other kind of not-copyreply file", "path", fileInfoReplyFile.fileRealPath)
 							return
 						}
 
-						log.Printf("info: got copyreply message, copy went ok for: %v\n", fileInfoReplyFile.actualFileNameToCopy)
+						slog.Info("got copyreply message, copy went ok for", "path", filepath.Join(s.configuration.copySrcFolder, fileInfoReplyFile.actualFileNameToCopy))
 
 						if s.configuration.deleteReplies {
 							err := os.Remove(fileInfoReplyFile.fileRealPath)
 							if err != nil {
-								log.Printf("error: failed to remove reply folder file: %v\n", err)
+								slog.Info("startRepliesWatcher: failed to remove reply folder file", "path", err)
 							}
 
 							fname := filepath.Join(fileInfoReplyFile.fileDir, fileInfoReplyFile.actualFileNameToCopy)
@@ -541,13 +543,13 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 
 						err = os.Remove(copiedFileRealPath)
 						if err != nil {
-							log.Printf("error2: failed to remove actual file: %v\n", err)
+							slog.Info("startRepliesWatcher: failed to remove actual file", "error", err)
 						}
 
 						// Done with with file.
 						// stop the timeout timer go routine for the specific file.
 						//s.allFilesState.cancelTimer(keyValue{k: copiedFileRealPath})
-						log.Printf("got reply: canceled timer for file: %v\n", copiedFileRealPath)
+						slog.Debug("startRepliesWatcher: got reply: canceled timer for file", "path", copiedFileRealPath)
 						// delete the entry for the file int the map.
 						//s.allFilesState.delete(keyValue{k: copiedFileRealPath})
 
@@ -576,7 +578,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 				if !ok {
 					return
 				}
-				log.Println("error:", err)
+				slog.Info("startRepliesWatcher: watcher error", "error", err)
 			}
 		}
 	}()
@@ -584,7 +586,8 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 	// Add a path.
 	err = watcher.Add(s.configuration.msgRepliesFolder)
 	if err != nil {
-		log.Fatal(err)
+		slog.Info("startRepliesWatcher: failed to add watcher", "error", err)
+		os.Exit(1)
 	}
 
 	return nil
@@ -650,7 +653,7 @@ func (s *server) getInitialFiles(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			fmt.Println(path, info.Size())
+			slog.Debug("getInitialFiles: found file", "path", path, "size", info.Size())
 
 			f, err := newFileInfo(ctx, path)
 			if err != nil && err == errIsDir {
@@ -705,6 +708,7 @@ func messageToSocket(socketFullPath string, msg []Message) error {
 }
 
 func main() {
+
 	defer profile.Start(profile.MemProfile, profile.MemProfileRate(1)).Stop()
 
 	go func() {
@@ -716,7 +720,7 @@ func main() {
 
 	s, err := newServer()
 	if err != nil {
-		log.Printf("%v\n", err)
+		slog.Info("main: failed to create new server", "error", err)
 		os.Exit(1)
 	}
 
@@ -727,31 +731,32 @@ func main() {
 	// Create new watcher.
 	logWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Fatal(err)
+		slog.Info("main: failed to create new logWatcher", "error", err)
+		os.Exit(1)
 	}
 	defer logWatcher.Close()
 
 	err = s.startLogsWatcher(ctx, logWatcher)
 	if err != nil {
-		log.Printf("%v\n", err)
+		slog.Info("main: failed to start logWatcher", "error", err)
 		os.Exit(1)
 	}
 
 	repliesWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Fatal(err)
+		slog.Info("main: failed to create new repliesWatcher", "error", err)
 	}
 	defer repliesWatcher.Close()
 
 	err = s.startRepliesWatcher(ctx, repliesWatcher)
 	if err != nil {
-		log.Printf("%v\n", err)
+		slog.Info("main: failed to start repliesWatcher", "error", err)
 		os.Exit(1)
 	}
 
 	err = s.getInitialFiles(ctx)
 	if err != nil {
-		log.Printf("%v\n", err)
+		slog.Info("main: failed to get initial files", "error", err)
 		os.Exit(1)
 	}
 
@@ -772,27 +777,26 @@ func main() {
 				for {
 					kv, ok := s.allFilesState.nextUnlocked()
 					if !ok {
-						fmt.Println("found no new unlocked items in the map")
+						slog.Debug("main: found no new unlocked items in the map")
 						break
 					}
 
-					fmt.Printf(" *** blocked, waiting to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(s.maxCopyProcessesCh), kv.k)
 					s.maxCopyProcessesCh <- struct{}{}
-					fmt.Printf(" *** *** putting value to process........ Length of maxCopyProcessesCh: %v, file: %v\n", len(s.maxCopyProcessesCh), kv.k)
 
-					log.Printf("info: got nextUnlocked file to be processed: %+v\n", kv.k)
+					slog.Debug("main: got nextUnlocked file to be processed", "file", kv.k)
+
 					// Update the map element for the file with statusLocked.
-					fmt.Printf(" --- before setting value to locked, file: %v\n", kv.k)
+					slog.Debug("main: before setting value to locked", "file", kv.k)
 					kv.v.fileState.locked = true
 					s.allFilesState.update(kv)
-					fmt.Printf(" --- --- after setting value to locked, file: %v\n", kv.k)
+					slog.Debug("main: after setting value to locked", "file", kv.k)
 
 					// Start up a go routine who will belong to the individual file,
 					// and also be responsible for checking if the file is older than
 					// max age. When the file is older than max age we send it to the
 					// socket.
 					go func(kv keyValue) {
-						log.Printf("info: start up check interval timer for file: %+v\n", kv.k)
+						slog.Info("main: start up check interval timer for file", "path", kv.k)
 
 						ticker2 := time.NewTicker(time.Second * (time.Duration(s.configuration.checkInterval)))
 						defer ticker2.Stop()
@@ -804,26 +808,25 @@ func main() {
 								age := timeNow - kv.v.modTime
 
 								if age > s.configuration.maxFileAge {
-									log.Printf("info: file with age %v seconds is older than maxAge %v seconds, preparing to send file to socket: %v\n", age, s.configuration.maxFileAge, kv.v.fileRealPath)
+									slog.Debug("main: file is older than maxAge, preparing to send file to socket", "age", age, "maxFileAge", s.configuration.maxFileAge, "path", kv.v.fileRealPath)
 
-									fmt.Printf("DEBUG1: %v\n", kv.k)
 									select {
 									case processFileCh <- kv:
-										fmt.Printf(" * DEBUG: got file to process: %v\n", kv.k)
+										slog.Debug("main: got file to process", "path", kv.k)
 									case <-kv.v.fileState.ctx.Done():
 										// If ctx.Done just continue to release a value on
 										// maxCopyProcesses.
-										fmt.Printf(" * DEBUG: got ctx.Done when waiting for files to process: %v\n", kv.k)
+										slog.Debug("main: got ctx.Done when waiting for files to process", "path", kv.k)
 									}
 
 									return
 
 								}
 
-								log.Printf("info: file not old enough, age %v seconds, maxAge set %v seconds, looping: %v\n", age, s.configuration.maxFileAge, kv.v.fileRealPath)
+								slog.Debug("main: file not old enough, looping", "age", age, "maxFileAge", s.configuration.maxFileAge, "path", kv.v.fileRealPath)
 
 							case <-kv.v.fileState.ctx.Done():
-								log.Printf("info: got <-ctx.Done checking for file age for file: %+v\n", kv.k)
+								slog.Debug("info: got <-ctx.Done checking for file age for file", "path", kv.k)
 								return
 							}
 
@@ -845,7 +848,7 @@ func main() {
 		for {
 			select {
 			case kv := <-processFileCh:
-				fmt.Printf(" *** DEBUG: <-processFileCh : %+v\n", kv)
+				slog.Debug("main: <-processFileCh", "kv", kv)
 				err = s.sendMessage(kv.v)
 				if err != nil {
 					log.Printf("%v\n", err)
@@ -865,7 +868,7 @@ func main() {
 				go func(kv keyValue) {
 					t, err := strconv.Atoi(s.configuration.copyMaxTransferTime)
 					if err != nil {
-						log.Printf("error: failed to convert copyMaxTransferTime to int: %v\n", err)
+						slog.Info("main: failed to convert copyMaxTransferTime to int", "error", err)
 						os.Exit(1)
 					}
 
@@ -874,12 +877,12 @@ func main() {
 					select {
 					case <-ticker.C:
 						s.allFilesState.lockTimeoutCh <- kv
-						log.Printf("info: sendt message and got lockTimeout, so we never got a reply message within the time, unlocking file to be reprocessed: %v\n", kv.k)
+						slog.Debug("sendt message and got lockTimeout, so we never got a reply message within the time, unlocking file to be reprocessed", "path", kv.k)
 
 					// When a file is successfully copied, we should receive
 					// a done signal here so we can return from this the go routine.
 					case <-kv.v.fileState.ctx.Done():
-						log.Printf("info: got <-ctx.Done on file: %v\n", kv.k)
+						slog.Debug("main: process file: got <-ctx.Done on file", "path", kv.k)
 						return
 					}
 				}(kv)
