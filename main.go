@@ -121,24 +121,6 @@ func (f *allFilesState) exists(kv keyValue) bool {
 	return exists
 }
 
-// delete will delete a key value pair from the map.
-func (f *allFilesState) delete(kv keyValue) {
-	f.mu.Lock()
-	delete(f.m, kv.k)
-	f.mu.Unlock()
-
-}
-
-// cancelTimer will cancel the timer go routine belonging to a file
-// that is used for checking for stale copy processes.
-func (f *allFilesState) cancelTimer(kv keyValue) {
-	f.mu.Lock()
-	slog.Debug("cancelTimer: Canceling timer for file", "path", kv.k)
-	f.m[kv.k].fileState.cancel()
-	f.mu.Unlock()
-
-}
-
 func newAllFilesState() *allFilesState {
 	f := allFilesState{
 		m:             make(map[string]fileInfo),
