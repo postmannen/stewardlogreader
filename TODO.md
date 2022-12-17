@@ -12,3 +12,12 @@
 1.1.1 is same as 1.1 but testing with pointers for map values, but not merged into 1.1
 
 1.1.2 is same as 1.1, but further testing with still copy values with map
+
+## When hangs
+
+It starts working again when logs node restarted, and stewardlogreader restarted.
+
+Seems like just restarting the logreader does not help.
+
+Talisman: Working after restarting: logs steward, local steward, logreader
+Morning-lena: working after restarting: logs steward, logreader

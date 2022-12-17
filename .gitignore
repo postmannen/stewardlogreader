@@ -18,5 +18,9 @@ logs/
 logs.orig/
 logs-copied/
 replies/
+logs.nosync/
+logs.orig.nosync/
+logs-copied.nosync/
+replies.nosync/
 stewardlogreader-linux-amd64
 stewardlogreader-linux-amd64.tar.gz

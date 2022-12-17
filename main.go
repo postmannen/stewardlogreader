@@ -318,7 +318,10 @@ func (s *server) startLockTimeoutReleaser(ctx context.Context) {
 			// to call cancel that go routine here. We just set the value for
 			// the specific file to false so it will be retried later.
 
+			s.allFilesState.mu.Lock()
 			kv.v.fileState.locked = false
+			s.allFilesState.mu.Unlock()
+
 			s.allFilesState.update(kv)
 			slog.Debug("startLockTimeoutReleaser: received value on lockTimeoutCh, setting locked=false, and giving Cancel() to go routines for file", "path", kv.k)
 
@@ -775,8 +778,12 @@ func main() {
 
 					// Update the map element for the file with statusLocked.
 					slog.Debug("main: before setting value to locked", "file", kv.k)
+
+					s.allFilesState.mu.Lock()
 					kv.v.fileState.locked = true
+					s.allFilesState.mu.Unlock()
 					s.allFilesState.update(kv)
+
 					slog.Debug("main: after setting value to locked", "file", kv.k)
 
 					// Start up a go routine who will belong to the individual file,
@@ -866,6 +873,13 @@ func main() {
 					case <-ticker.C:
 						s.allFilesState.lockTimeoutCh <- kv
 						slog.Debug("sendt message and got lockTimeout, so we never got a reply message within the time, unlocking file to be reprocessed", "path", kv.k)
+
+						select {
+						case <-s.maxCopyProcessesCh:
+							slog.Debug("never got a reply message within the time, released 1 element on maxCopyProcessesCh", "path", kv.k)
+						default:
+							slog.Debug("never got a reply message within the time, tried to release 1 element on maxCopyProcessesCh, but the channel were already empty", "path", kv.k)
+						}
 
 					// When a file is successfully copied, we should receive
 					// a done signal here so we can return from this the go routine.
