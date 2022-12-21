@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/profile"
 	"golang.org/x/exp/slog"
-	"gopkg.in/fsnotify.v1"
 	"gopkg.in/yaml.v3"
 
 	_ "net/http/pprof"
@@ -351,7 +351,7 @@ func (s *server) startLogsWatcher(ctx context.Context, watcher *fsnotify.Watcher
 					return
 				}
 
-				if event.Op == notifyOp {
+				if event.Op == fsnotify.Create || event.Op == fsnotify.Chmod {
 					// fmt.Printf("___DEBUG: fsnotify log folder event: %v, type: %v\n", event.Name, event.Op.String())
 
 					fileInfo, err := newFileInfo(ctx, event.Name)
@@ -462,7 +462,7 @@ func (s *server) startRepliesWatcher(ctx context.Context, watcher *fsnotify.Watc
 				// the logreader redo them.
 
 				go func() {
-					if event.Op == notifyOp {
+					if event.Op == fsnotify.Create || event.Op == fsnotify.Chmod {
 						// fmt.Printf("___DEBUG: fsnotify reply folder event: %v, type: %v\n", event.Name, event.Op)
 
 						fileInfoReplyFile, err := newFileInfo(ctx, event.Name)
