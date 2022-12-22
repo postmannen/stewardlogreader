@@ -612,6 +612,8 @@ func (s *server) sendMessage(file fileInfo) error {
 	m.Method = "REQCopySrc"
 	m.ACKTimeout = s.configuration.msgACKTimeout
 	m.Retries = s.configuration.msgRetries
+	m.ReplyACKTimeout = s.configuration.msgACKTimeout
+	m.ReplyRetries = s.configuration.msgRetries
 
 	m.MethodArgs[0] = filepath.Join(s.configuration.copySrcFolder, file.fileName)
 	m.MethodArgs[1] = s.configuration.copyDstToNode
