@@ -870,6 +870,7 @@ func main() {
 					}
 
 					ticker := time.NewTicker(time.Second * time.Duration(t*s.configuration.msgRetries))
+					defer ticker.Stop()
 
 					select {
 					case <-ticker.C:
