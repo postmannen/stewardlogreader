@@ -35,11 +35,7 @@ type server struct {
 }
 
 // newServer will prepare and return a *server.
-func newServer() (*server, error) {
-	configuration, err := newConfiguration()
-	if err != nil {
-		return &server{}, err
-	}
+func newServer(configuration *configuration) (*server, error) {
 
 	s := server{
 		allFilesState:      newAllFilesState(),
@@ -216,6 +212,8 @@ type configuration struct {
 	maxCopyProcesses int
 
 	logLevel string
+
+	profileHttpPort string
 }
 
 // newConfiguration will parse all the input flags, check if values
@@ -245,6 +243,8 @@ func newConfiguration() (*configuration, error) {
 	flag.IntVar(&c.maxCopyProcesses, "maxCopyProcesses", 5, "max copy processes to run simultaneously")
 
 	flag.StringVar(&c.logLevel, "logLevel", "info", "Select: info, debug")
+
+	flag.StringVar(&c.profileHttpPort, "profileHttpPort", "8266", "HTTP port for use with profiling")
 
 	flag.Parse()
 
@@ -702,21 +702,25 @@ func messageToSocket(socketFullPath string, msg []Message) error {
 
 func main() {
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c, err := newConfiguration()
+	if err != nil {
+		slog.Info("main: failed to create new configuration", "error", err)
+		os.Exit(1)
+	}
+
 	defer profile.Start(profile.MemProfile, profile.MemProfileRate(1)).Stop()
 
 	go func() {
-		http.ListenAndServe(":9100", nil)
+		http.ListenAndServe(":"+c.profileHttpPort, nil)
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	s, err := newServer()
+	s, err := newServer(c)
 	if err != nil {
 		slog.Info("main: failed to create new server", "error", err)
 		os.Exit(1)
 	}
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
