@@ -244,7 +244,7 @@ func newConfiguration() (*configuration, error) {
 
 	flag.StringVar(&c.logLevel, "logLevel", "info", "Select: info, debug")
 
-	flag.StringVar(&c.profileHttpPort, "profileHttpPort", "8266", "HTTP port for use with profiling")
+	flag.StringVar(&c.profileHttpPort, "profileHttpPort", ":8266", "ip address and http port to use with profiling in the format <ip>:<port>. If :<port> is used ip will be the same as 0.0.0.0")
 
 	flag.Parse()
 
@@ -713,7 +713,7 @@ func main() {
 	defer profile.Start(profile.MemProfile, profile.MemProfileRate(1)).Stop()
 
 	go func() {
-		http.ListenAndServe(":"+c.profileHttpPort, nil)
+		http.ListenAndServe(c.profileHttpPort, nil)
 	}()
 
 	s, err := newServer(c)
