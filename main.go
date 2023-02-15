@@ -244,7 +244,7 @@ func newConfiguration() (*configuration, error) {
 
 	flag.StringVar(&c.logLevel, "logLevel", "info", "Select: info, debug")
 
-	flag.StringVar(&c.profileHttpPort, "profileHttpPort", ":8266", "ip address and http port to use with profiling in the format <ip>:<port>. If :<port> is used ip will be the same as 0.0.0.0")
+	flag.StringVar(&c.profileHttpPort, "profileHttpPort", "127.0.0.1:8266", "ip address and http port to use with profiling in the format <ip>:<port>. If :<port> is used ip will be the same as 0.0.0.0")
 
 	flag.Parse()
 
